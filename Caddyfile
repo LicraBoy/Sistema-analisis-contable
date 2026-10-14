@@ -1,0 +1,36 @@
+# Proxy HTTPS del servidor de produccion (se ejecuta desde la raiz del proyecto: ver iniciar_produccion.bat).
+# SISTEMA_HOST = nombre que TI asigna a esta PC (ej. sistema.empresa.local).
+{
+	# Sin consola de administracion expuesta
+	admin off
+}
+
+https://{$SISTEMA_HOST} {
+	# Certificado: por omision, CA propia de Caddy (hay que instalar su raiz en las PCs, ver docs/DESPLIEGUE.md).
+	# Si TI entrega un certificado de la CA de la empresa, reemplazar la linea por:  tls certs/sistema.crt certs/sistema.key
+	tls internal
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# /api/* -> backend (quita el prefijo, igual que el proxy de Vite)
+	handle_path /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# Todo lo demas: el frontend ya compilado
+	handle {
+		root * frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Redirige http -> https
+http://{$SISTEMA_HOST} {
+	redir https://{host}{uri} permanent
+}

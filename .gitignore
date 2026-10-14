@@ -1,0 +1,67 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+env/
+*.so
+
+# ── Node ────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── IDE ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Env & Secrets ───────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Docker ──────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Uploads / Data ──────────────────────────────────────
+uploads/
+*.xlsx
+*.xls
+!tests/fixtures/*.xlsx
+
+# ── Datos reales y artefactos locales (NUNCA al repositorio) ────────
+backend/*.db
+backend/*.sqlite3
+backend/*.sqlite3-*
+backend/local_db.sqlite3.bak*
+backend/storage/
+backups/
+logs/
+caddy/
+frontend/dist/
+*.log
+frontend/tsc_out*.txt
+scratchpad*
+CLAUDE.md.bak*
+/query*.py
+/date_test.py
+/INVETARIOS/
+/saldo cuenta huesped/
+/analisis inteligente/
+docs/*.png
+docs/*.xlsx
+docs/*.xls
+docs/reporte de revision de produccion y ventas de Carnes y Mariscos/
