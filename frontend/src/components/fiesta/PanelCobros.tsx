@@ -38,6 +38,8 @@ import {
   useFiestaEvento,
   useFiestaGuardarPoliza,
   useFiestaHistorico,
+  useFiestaHistoricoPagos,
+  type FiestaHistoricoPagosDia,
   useFiestaSembrarHistorico,
   type FiestaCobroDia,
   type FiestaCobros,
@@ -109,19 +111,20 @@ function Etiqueta({ icono, texto }: { icono: ReactNode; texto: string }) {
 function VistaCobranza({ data }: { data: FiestaCobros }) {
   const h = data.hoy;
   const porCobrar = h?.por_cobrar ?? 0;
-  const vendido = data.total + porCobrar;
-  const avance = pct(data.total, vendido);
+  const vendido = data.neto + porCobrar;
+  const avance = pct(data.neto, vendido);
   const r = h?.reservas;
 
-  const serie = data.dias.map((d) => ({ dia: fechaCorta(d.fecha).slice(0, 5), cobrado: d.total, acumulado: d.acumulado }));
+  const serie = data.dias.map((d) => ({ dia: fechaCorta(d.fecha).slice(0, 5), cobrado: d.neto, acumulado: d.acumulado }));
   const hayMovimiento = data.dias.some((d) => d.total > 0);
 
   return (
     <Stack gap="lg">
       {/* Cobranza: lo primero que se pregunta */}
       <Paper withBorder radius="lg" p="lg" style={{ background: 'linear-gradient(135deg, var(--mantine-color-violet-light), transparent 70%)' }}>
-        <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="lg">
-          <Cifra etiqueta="Cobrado" valor={dinero(data.total)} color="green" grande />
+        <SimpleGrid cols={{ base: 1, sm: data.devuelto > 0 ? 4 : 3 }} spacing="lg">
+          <Cifra etiqueta={data.devuelto > 0 ? 'Cobrado (neto)' : 'Cobrado'} valor={dinero(data.neto)} color="green" grande />
+          {data.devuelto > 0 && <Cifra etiqueta="Devuelto a clientes" valor={dinero(data.devuelto)} color="orange" grande />}
           <Cifra etiqueta="Por cobrar" valor={dinero(porCobrar)} color={porCobrar > 0 ? 'red' : undefined} grande />
           <Cifra etiqueta="Cobrado hoy" valor={dinero(h?.cobrado_hoy ?? 0)} grande />
         </SimpleGrid>
@@ -131,7 +134,7 @@ function VistaCobranza({ data }: { data: FiestaCobros }) {
               Avance de cobranza
             </Text>
             <Text size="sm" c="dimmed">
-              {dinero(data.total)} de {dinero(vendido)} · <b>{avance} %</b>
+              {dinero(data.neto)} de {dinero(vendido)} · <b>{avance} %</b>
             </Text>
           </Group>
           <Progress value={avance} color="green" size="xl" radius="xl" striped animated={avance > 0 && avance < 100} />
@@ -293,7 +296,19 @@ function VistaDias({ data }: { data: FiestaCobros }) {
   const [verReservas, setVerReservas] = useState(true);
   const [verTipos, setVerTipos] = useState(true);
   const [verAnioPasado, setVerAnioPasado] = useState(true);
+  const [verNinos, setVerNinos] = useState(true);
   const { data: hist } = useFiestaHistorico();
+  const { data: pagosHist } = useFiestaHistoricoPagos(hist?.anio);
+  // Niños del año pasado por día (lista de boletos con fecha y monto); `null` si todavía no hay datos.
+  const ninosHist = useMemo(
+    () => (pagosHist?.tipos.nino.disponible ? new Map<string, FiestaHistoricoPagosDia>((pagosHist.dias ?? []).flatMap((x) => (x.nino ? [[x.fecha, x.nino] as [string, FiestaHistoricoPagosDia]] : []))) : null),
+    [pagosHist],
+  );
+  // Adultos del año pasado por día: solo la cantidad (la lista no se usa para dinero).
+  const adultosHist = useMemo(
+    () => (pagosHist?.tipos.adulto.disponible ? new Map<string, FiestaHistoricoPagosDia>((pagosHist.dias ?? []).flatMap((x) => (x.adulto ? [[x.fecha, x.adulto] as [string, FiestaHistoricoPagosDia]] : []))) : null),
+    [pagosHist],
+  );
   const sembrar = useFiestaSembrarHistorico();
   const anioPasado = hist?.anio ?? new Date().getFullYear() - 1;
   const filasHist = hist?.filas ?? [];
@@ -333,6 +348,11 @@ function VistaDias({ data }: { data: FiestaCobros }) {
           <Chip size="xs" checked={verTipos} onChange={setVerTipos} variant="light" color="teal">
             Tipo de boleto
           </Chip>
+          {ninosHist && (
+            <Chip size="xs" checked={verNinos} onChange={setVerNinos} variant="light" color="grape">
+              Niños y adultos vs {anioPasado}
+            </Chip>
+          )}
           {hayHistorico ? (
             <Chip size="xs" checked={verAnioPasado} onChange={setVerAnioPasado} variant="light" color="gray">
               Mismo día de {anioPasado}
@@ -346,7 +366,7 @@ function VistaDias({ data }: { data: FiestaCobros }) {
         <Switch size="sm" label="Ocultar días sin movimiento" checked={soloMovimiento} onChange={(e) => setSoloMovimiento(e.currentTarget.checked)} />
       </Group>
 
-      <Table.ScrollContainer minWidth={760} mah={620}>
+      <Table.ScrollContainer type="native" minWidth={760} mah="calc(100vh - 240px)" style={{ minHeight: 320 }}>
         <Table stickyHeader verticalSpacing={7} horizontalSpacing="md" fz="sm" highlightOnHover>
           <Table.Thead style={{ background: 'var(--mantine-color-body)' }}>
             <Table.Tr>
@@ -359,6 +379,7 @@ function VistaDias({ data }: { data: FiestaCobros }) {
                 </>
               )}
               <Table.Th ta="right">Cobrado</Table.Th>
+              {t.devuelto > 0 && <Table.Th ta="right" c="orange">Devuelto</Table.Th>}
               <Table.Th ta="right">Acumulado</Table.Th>
               {verTipos && (
                 <>
@@ -368,6 +389,20 @@ function VistaDias({ data }: { data: FiestaCobros }) {
                   <Table.Th ta="right" c="dimmed">Acum. Adultos</Table.Th>
                   <Table.Th ta="right" c="dimmed">Niños</Table.Th>
                   <Table.Th ta="right" c="dimmed">Cortesías</Table.Th>
+                </>
+              )}
+              {ninosHist && verNinos && (
+                <>
+                  <Table.Th ta="right" c="grape" style={{ borderLeft: '2px solid var(--mantine-color-gray-4)' }}>Niños cobrado hoy</Table.Th>
+                  <Table.Th ta="right" c="grape">Niños cobrado {anioPasado}</Table.Th>
+                  <Table.Th ta="right" c="grape">Niños vendidos {anioPasado}</Table.Th>
+                  <Table.Th ta="right" c="grape">Dif. niños vendidos</Table.Th>
+                  {adultosHist && (
+                    <>
+                      <Table.Th ta="right" c="grape">Adultos vendidos {anioPasado}</Table.Th>
+                      <Table.Th ta="right" c="grape">Dif. adultos vendidos</Table.Th>
+                    </>
+                  )}
                 </>
               )}
               {verReservas && (
@@ -393,11 +428,11 @@ function VistaDias({ data }: { data: FiestaCobros }) {
           </Table.Thead>
           <Table.Tbody>
             {filas.map((d) => (
-              <FilaDia key={d.fecha} d={d} esHoy={d.fecha === hoy} verPagos={verPagos} verReservas={verReservas} verTipos={verTipos} anioPasado={mostrarAnioPasado ? { anio: anioPasado, filas: filasHist } : null} />
+              <FilaDia key={d.fecha} d={d} esHoy={d.fecha === hoy} verPagos={verPagos} verReservas={verReservas} verTipos={verTipos} verDevuelto={t.devuelto > 0} anioPasado={mostrarAnioPasado ? { anio: anioPasado, filas: filasHist } : null} ninosHist={verNinos ? ninosHist : null} adultosHist={verNinos ? adultosHist : null} anioNinos={anioPasado} />
             ))}
             {filas.length === 0 && (
               <Table.Tr>
-                <Table.Td colSpan={19} ta="center" c="dimmed">
+                <Table.Td colSpan={25} ta="center" c="dimmed">
                   No hay días con movimiento.
                 </Table.Td>
               </Table.Tr>
@@ -414,6 +449,7 @@ function VistaDias({ data }: { data: FiestaCobros }) {
                 </>
               )}
               <Table.Th ta="right">{dinero(t.total)}</Table.Th>
+              {t.devuelto > 0 && <Table.Th ta="right" c="orange">{`−${dinero(t.devuelto)}`}</Table.Th>}
               <Table.Th />
               {verTipos && (
                 <>
@@ -421,6 +457,20 @@ function VistaDias({ data }: { data: FiestaCobros }) {
                   <Table.Th ta="right">{data.dias.reduce((a, d) => a + d.vendidas.nino, 0)}</Table.Th>
                   <Table.Th ta="right">{data.dias.reduce((a, d) => a + d.vendidas.cortesia, 0)}</Table.Th>
                   <Table.Th colSpan={3} />
+                </>
+              )}
+              {ninosHist && verNinos && (
+                <>
+                  <Table.Th ta="right">{dinero(data.dias.reduce((a, d) => a + (d.cobrado_por_tipo?.nino ?? 0), 0))}</Table.Th>
+                  <Table.Th ta="right">{dinero(pagosHist?.tipos.nino.cobrado ?? 0)}</Table.Th>
+                  <Table.Th ta="right">{pagosHist?.tipos.nino.boletos ?? 0}</Table.Th>
+                  <Table.Th />
+                  {adultosHist && (
+                    <>
+                      <Table.Th ta="right">{pagosHist?.tipos.adulto.boletos ?? 0}</Table.Th>
+                      <Table.Th />
+                    </>
+                  )}
                 </>
               )}
               {verReservas && <Table.Th colSpan={5} />}
@@ -446,16 +496,30 @@ function FilaDia({
   verPagos,
   verReservas,
   verTipos,
+  verDevuelto,
   anioPasado,
+  ninosHist,
+  adultosHist,
+  anioNinos,
 }: {
   d: FiestaCobroDia;
   esHoy: boolean;
   verPagos: boolean;
   verReservas: boolean;
   verTipos: boolean;
+  verDevuelto: boolean;
   anioPasado: { anio: number; filas: FiestaHistoricoFila[] } | null;
+  /** Niños del año pasado por fecha (lista de boletos con fecha y monto); null = columnas ocultas. */
+  ninosHist: Map<string, FiestaHistoricoPagosDia> | null;
+  adultosHist: Map<string, FiestaHistoricoPagosDia> | null;
+  anioNinos: number;
 }) {
+  const adultoAntes = adultosHist ? adultosHist.get(`${anioNinos}${d.fecha.slice(4)}`) : undefined;
+  const difAdultos = adultosHist ? d.vendidas.adulto - (adultoAntes?.reservados ?? 0) : null;
   const finde = esFinDeSemana(d.fecha);
+  const ninoAntes = ninosHist ? ninosHist.get(`${anioNinos}${d.fecha.slice(4)}`) : undefined;
+  const difNinos = ninosHist ? d.vendidas.nino - (ninoAntes?.reservados ?? 0) : null;
+  const cobradoNinos = d.cobrado_por_tipo?.nino ?? 0;
   const previo = anioPasado ? filaDelAnioPasado(anioPasado.filas, d.fecha, anioPasado.anio) : null;
   const celdaPrevio = (valor: number | undefined) =>
     previo ? (
@@ -498,6 +562,11 @@ function FilaDia({
       <Table.Td ta="right" fw={d.total > 0 ? 700 : undefined}>
         {dineroONada(d.total)}
       </Table.Td>
+      {verDevuelto && (
+        <Table.Td ta="right" c="orange">
+          {d.devuelto > 0 ? `−${dinero(d.devuelto)}` : <Text span c="dimmed">·</Text>}
+        </Table.Td>
+      )}
       <Table.Td ta="right" c="dimmed">
         {dinero(d.acumulado)}
       </Table.Td>
@@ -509,6 +578,20 @@ function FilaDia({
           <Table.Td ta="right" c="dimmed">{d.reservas.tipos.adulto}</Table.Td>
           <Table.Td ta="right" c="dimmed">{d.reservas.tipos.nino}</Table.Td>
           <Table.Td ta="right" c="dimmed">{d.reservas.tipos.cortesia}</Table.Td>
+        </>
+      )}
+      {ninosHist && (
+        <>
+          <Table.Td ta="right" style={{ borderLeft: '2px solid var(--mantine-color-gray-4)' }} fw={cobradoNinos > 0 ? 700 : undefined}>{cobradoNinos > 0 ? dinero(cobradoNinos) : <Text span c="dimmed">·</Text>}</Table.Td>
+          <Table.Td ta="right" c="dimmed">{ninoAntes && ninoAntes.cobrado > 0 ? dinero(ninoAntes.cobrado) : '·'}</Table.Td>
+          <Table.Td ta="right" c="dimmed" title={ninoAntes && ninoAntes.liquidaciones > 0 ? `${ninoAntes.liquidaciones} liquidación(es) de anticipos de otros días` : undefined}>{ninoAntes?.reservados ? ninoAntes.reservados : '·'}</Table.Td>
+          <Table.Td ta="right" fw={600} c={difNinos === null || difNinos === 0 ? 'dimmed' : difNinos > 0 ? 'green' : 'red'}>{difNinos === null || difNinos === 0 ? '·' : `${difNinos > 0 ? '+' : ''}${difNinos}`}</Table.Td>
+          {adultosHist && (
+            <>
+              <Table.Td ta="right" c="dimmed">{adultoAntes?.reservados ? adultoAntes.reservados : '·'}</Table.Td>
+              <Table.Td ta="right" fw={600} c={difAdultos === null || difAdultos === 0 ? 'dimmed' : difAdultos > 0 ? 'green' : 'red'}>{difAdultos === null || difAdultos === 0 ? '·' : `${difAdultos > 0 ? '+' : ''}${difAdultos}`}</Table.Td>
+            </>
+          )}
         </>
       )}
       {verReservas && (
@@ -624,7 +707,7 @@ function VistaContabilidad({ data }: { data: FiestaCobros }) {
                       <Text span fw={600}>{fechaCorta(d.fecha)}</Text>{' '}
                       <Text span size="xs" c="dimmed">{diaSemana(d.fecha)}</Text>
                     </Table.Td>
-                    <Table.Td ta="right">{dineroONada(d.total)}</Table.Td>
+                    <Table.Td ta="right">{dineroONada(d.neto)}</Table.Td>
                     <Table.Td ta="right">{dineroONada(d.sin_iva)}</Table.Td>
                     <Table.Td ta="right" w={170}>
                       <CeldaPoliza d={d} />
@@ -638,7 +721,7 @@ function VistaContabilidad({ data }: { data: FiestaCobros }) {
               <Table.Tfoot style={{ background: 'var(--mantine-color-gray-1)', position: 'sticky', bottom: 0 }}>
                 <Table.Tr>
                   <Table.Th>Total</Table.Th>
-                  <Table.Th ta="right">{dinero(t.total)}</Table.Th>
+                  <Table.Th ta="right">{dinero(t.neto)}</Table.Th>
                   <Table.Th ta="right">{dinero(t.sin_iva)}</Table.Th>
                   <Table.Th ta="right">{t.dias_con_poliza > 0 ? dinero(t.poliza) : '—'}</Table.Th>
                   <Table.Th ta="right" c={t.dias_con_poliza > 0 && Math.abs(t.diferencia) > 0.01 ? 'red' : undefined}>

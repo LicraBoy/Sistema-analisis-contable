@@ -25,11 +25,13 @@ import {
   useFiestaSembrar,
 } from '../api/fiestaHooks';
 import { useAuth } from '../auth/AuthContext';
+import GuiaCajeras from '../components/fiesta/GuiaCajeras';
 import PanelAuditoria from '../components/fiesta/PanelAuditoria';
 import ConfiguracionFiesta from '../components/fiesta/ConfiguracionFiesta';
 import CroquisFiesta from '../components/fiesta/CroquisFiesta';
 import PanelCobros from '../components/fiesta/PanelCobros';
 import PanelResumenFiesta from '../components/fiesta/PanelResumenFiesta';
+import SolicitudesCortesia from '../components/fiesta/SolicitudesCortesia';
 import { SupervisorProvider } from '../components/fiesta/SupervisorPin';
 import TablaReservaciones from '../components/fiesta/TablaReservaciones';
 
@@ -39,6 +41,7 @@ export default function FiestaFinAnioPage() {
   const [pestana, setPestana] = useState<string | null>('croquis');
   const { puede } = useAuth();
   const veAuditoria = puede('fiesta_auditoria', 1); // las cajeras no la ven (el servidor también responde 403)
+  const veCampana = puede('fiesta_supervisor', 2); // solo quien puede autorizar cortesías ve la campana
 
   if (isLoading) return <Loader />;
 
@@ -87,7 +90,13 @@ export default function FiestaFinAnioPage() {
   return (
     <SupervisorProvider>
     <Stack gap="md">
-      <Title order={2}>{evento.nombre}</Title>
+      <Group justify="space-between" align="center" wrap="wrap">
+        <Title order={2}>{evento.nombre}</Title>
+        <Group gap="xs">
+          {veCampana && <SolicitudesCortesia />}
+          <GuiaCajeras />
+        </Group>
+      </Group>
 
       <Tabs value={pestana} onChange={setPestana} variant="pills" color="violet" keepMounted={false}>
         <Tabs.List mb="md">

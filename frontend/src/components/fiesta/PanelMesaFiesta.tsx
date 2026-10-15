@@ -61,6 +61,7 @@ export default function PanelMesaFiesta({ mesa, evento, onVerReservacion }: Prop
   const [capturadoPor, setCapturadoPor] = useState(leerCapturista());
   const [fechaVenta, setFechaVenta] = useState(hoyISO());
   const [correo, setCorreo] = useState('');
+  const [motivoCortesia, setMotivoCortesia] = useState('');
   // Permiso para respetar el precio de preventa después del corte (queda registrado quién lo autoriza).
   const [preventa, setPreventa] = useState(false);
   const [autorizadoPor, setAutorizadoPor] = useState('');
@@ -191,13 +192,28 @@ export default function PanelMesaFiesta({ mesa, evento, onVerReservacion }: Prop
     );
   };
 
+  // Nombre, teléfono y correo son obligatorios para continuar con la reservación.
+  const nombreOk = cliente.trim().length >= 2;
+  const telefonoOk = contacto.replace(/\D/g, '').length >= 7;
+  const correoOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(correo.trim());
+  const datosCompletos = nombreOk && telefonoOk && correoOk;
+  const [intento, setIntento] = useState(false);
+  // Las cortesías llevan motivo y las autoriza un supervisor (le llega un aviso, sin contraseña).
+  const hayCortesia = seleccion.some((s) => s.tipo === 'cortesia');
+  const cortesiaOk = !hayCortesia || motivoCortesia.trim().length >= 3;
+
   const reservar = async () => {
-    if (!cliente.trim()) {
-      notifications.show({ color: 'red', message: 'Captura el nombre del cliente.' });
+    setIntento(true);
+    if (!datosCompletos) {
+      notifications.show({ color: 'red', message: 'Para reservar captura el nombre, un teléfono (mínimo 7 dígitos) y un correo válido del cliente.' });
       return;
     }
     if (seleccion.length === 0) {
       notifications.show({ color: 'red', message: 'Elige al menos una silla libre.' });
+      return;
+    }
+    if (!cortesiaOk) {
+      notifications.show({ color: 'red', message: 'Escribe el motivo de la cortesía.' });
       return;
     }
     if (forzarPreventa && (autorizadoPor.trim().length < 3 || motivoPreventa.trim().length < 3)) {
@@ -205,27 +221,40 @@ export default function PanelMesaFiesta({ mesa, evento, onVerReservacion }: Prop
       return;
     }
     guardarCapturista(capturadoPor);
-    // Respetar la preventa después del corte lo autoriza el supervisor (PIN).
+    // Respetar la preventa después del corte lo autoriza el supervisor. Las cortesías no piden contraseña:
+    // se apartan y le llega el aviso a un supervisor (o se autorizan solas si quien reserva es supervisor).
     const pin = forzarPreventa ? await pedirPin('respetar el precio de preventa') : '';
     if (pin === null) return;
     try {
       const reservacion = await crear.mutateAsync({
         pin: pin || undefined,
         cliente: cliente.trim(),
-        telefono_o_cuarto: contacto || undefined,
-        correo: correo.trim() || undefined,
+        telefono_o_cuarto: contacto.trim(),
+        correo: correo.trim(),
+        cortesia_motivo: hayCortesia ? motivoCortesia.trim() : undefined,
         notas: notas || undefined,
         fecha_venta: fechaVenta,
         capturado_por: capturadoPor || undefined,
         sillas: seleccion,
         preventa_autorizada: forzarPreventa ? { por: autorizadoPor.trim(), motivo: motivoPreventa.trim() } : undefined,
       });
-      notifications.show({ color: 'green', message: `Reservación #${reservacion.id} creada.` });
+      notifications.show(
+        reservacion.cortesias_por_autorizar > 0
+          ? {
+              color: 'yellow',
+              title: `Reservación #${reservacion.id} creada`,
+              message: `${reservacion.cortesias_por_autorizar} silla(s) de cortesía quedaron apartadas. Ya se avisó a un supervisor para que las autorice.`,
+              autoClose: 9000,
+            }
+          : { color: 'green', message: `Reservación #${reservacion.id} creada.` },
+      );
       setElegidas({});
       setCliente('');
       setContacto('');
       setNotas('');
       setCorreo('');
+      setMotivoCortesia('');
+      setIntento(false);
       setPreventa(false);
       setAutorizadoPor('');
       setMotivoPreventa('');
@@ -352,15 +381,31 @@ export default function PanelMesaFiesta({ mesa, evento, onVerReservacion }: Prop
             </Alert>
           )}
 
-          <TextInput label="Cliente" required value={cliente} onChange={(e) => setCliente(e.currentTarget.value)} />
+          <TextInput
+            label="Nombre del cliente"
+            required
+            value={cliente}
+            onChange={(e) => setCliente(e.currentTarget.value)}
+            error={intento && !nombreOk ? 'Captura el nombre del cliente' : undefined}
+          />
           <SimpleGrid cols={{ base: 1, xs: 2 }}>
-            <TextInput label="Teléfono o cuarto" value={contacto} onChange={(e) => setContacto(e.currentTarget.value)} />
             <TextInput
-              label="Correo del huésped"
+              label="Teléfono"
+              required
+              type="tel"
+              placeholder="669 123 4567"
+              value={contacto}
+              onChange={(e) => setContacto(e.currentTarget.value)}
+              error={intento && !telefonoOk ? 'Captura un teléfono (mínimo 7 dígitos)' : undefined}
+            />
+            <TextInput
+              label="Correo"
+              required
               type="email"
               placeholder="nombre@correo.com"
               value={correo}
               onChange={(e) => setCorreo(e.currentTarget.value)}
+              error={intento && !correoOk ? 'Captura un correo válido' : undefined}
             />
           </SimpleGrid>
           <SimpleGrid cols={{ base: 1, xs: 2 }}>
@@ -383,6 +428,16 @@ export default function PanelMesaFiesta({ mesa, evento, onVerReservacion }: Prop
               )}
             </Paper>
           )}
+          {hayCortesia && (
+            <TextInput
+              label="Motivo de la cortesía"
+              required
+              description="Las cortesías las autoriza un supervisor: al reservar se pedirá su contraseña."
+              value={motivoCortesia}
+              onChange={(e) => setMotivoCortesia(e.currentTarget.value)}
+              error={intento && !cortesiaOk ? 'Escribe el motivo de la cortesía' : undefined}
+            />
+          )}
           <Textarea label="Notas" value={notas} onChange={(e) => setNotas(e.currentTarget.value)} minRows={2} autosize />
 
           <Paper withBorder p="sm" bg="var(--mantine-color-gray-light)">
@@ -398,7 +453,12 @@ export default function PanelMesaFiesta({ mesa, evento, onVerReservacion }: Prop
             Aquí solo se aparta el lugar. Los abonos se registran en la reservación (pestaña Reservaciones → Abonar).
           </Text>
 
-          <Button size="md" onClick={reservar} loading={crear.isPending}>
+          {!datosCompletos && (
+            <Text size="xs" c="orange.7">
+              Faltan datos del cliente: nombre, teléfono y correo son obligatorios para reservar.
+            </Text>
+          )}
+          <Button size="md" onClick={reservar} loading={crear.isPending} disabled={!datosCompletos || !cortesiaOk}>
             Reservar {seleccion.length} {seleccion.length === 1 ? 'silla' : 'sillas'}
           </Button>
         </>

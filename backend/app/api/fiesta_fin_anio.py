@@ -26,12 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.permisos import requiere_capacidad
+from app.core.permisos import requiere_capacidad, tiene_capacidad
 from app.services.fiesta_auditoria import GRUPOS as GRUPOS_AUDITORIA, clasificar, fila_a_dict, pares_de_grupo
 from app.core.security import autorizo_por, consumir_autorizacion, get_current_user, ip_actual, usuario_actual
 from app.db.session import get_db
 from app.models import (
     FiestaBitacora,
+    FiestaDevolucion,
     FiestaEvento,
     FiestaHistorico,
     FiestaMesa,
@@ -41,8 +42,10 @@ from app.models import (
     FiestaReservacion,
     FiestaReservacionSilla,
     FiestaSilla,
+    FiestaSolicitudCortesia,
 )
 from app.services.fiesta_fin_anio import (
+    calcular_por_devolver,
     calcular_reservacion,
     conciliar_contabilidad,
     construir_cobros,
@@ -57,11 +60,13 @@ from app.services.fiesta_fin_anio import (
     mesas_semilla,
     precio_aplicable,
     repartir_pagos_por_silla,
+    resumir_pagos_historicos,
 )
 
 logger = logging.getLogger(__name__)
 
 from app.services.fiesta_fin_anio_historico import HISTORICO  # noqa: E402
+from app.services.fiesta_fin_anio_historico_pagos import HISTORICO_PAGOS, NINOS_ESPERADOS, TIPOS_CON_DINERO  # noqa: E402
 
 router = APIRouter()
 
@@ -92,6 +97,21 @@ class PagoIn(BaseModel):
 _RE_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def _validar_telefono_obligatorio(v: str | None) -> str:
+    """Teléfono de contacto obligatorio al reservar: al menos 7 dígitos (se aceptan espacios, guiones y +)."""
+    v = (v or "").strip()
+    if len(re.sub(r"\D", "", v)) < 7:
+        raise ValueError("Captura el teléfono del cliente (mínimo 7 dígitos).")
+    return v
+
+
+def _validar_correo_obligatorio(v: str | None) -> str:
+    v = _validar_correo(v)
+    if not v:
+        raise ValueError("Captura el correo del cliente.")
+    return v
+
+
 def _validar_correo(v: str | None) -> str | None:
     """Correo opcional: vacío → None; si viene, formato básico usuario@dominio.ext."""
     v = (v or "").strip()
@@ -110,16 +130,33 @@ class PreventaIn(BaseModel):
 
 
 class ReservacionIn(BaseModel):
+    """Para reservar son OBLIGATORIOS el nombre, el teléfono y el correo del cliente."""
+
     cliente: str = Field(min_length=1, max_length=255)
-    telefono_o_cuarto: str | None = Field(default=None, max_length=80)
-    correo: str | None = Field(default=None, max_length=255)
+    telefono_o_cuarto: str = Field(max_length=80)
+    correo: str = Field(max_length=255)
     preventa_autorizada: PreventaIn | None = None
+    # Si hay sillas de cortesía: motivo obligatorio + autorización de supervisor.
+    cortesia_motivo: str | None = Field(default=None, max_length=255)
     notas: str | None = None
+
+    @field_validator("cliente")
+    @classmethod
+    def _cliente_ok(cls, v):
+        v = (v or "").strip()
+        if len(v) < 2:
+            raise ValueError("Captura el nombre del cliente.")
+        return v
+
+    @field_validator("telefono_o_cuarto")
+    @classmethod
+    def _telefono_ok(cls, v):
+        return _validar_telefono_obligatorio(v)
 
     @field_validator("correo")
     @classmethod
     def _correo_ok(cls, v):
-        return _validar_correo(v)
+        return _validar_correo_obligatorio(v)
 
     fecha_venta: date | None = None
     capturado_por: str | None = Field(default=None, max_length=80)
@@ -166,12 +203,23 @@ class ReservacionPatch(BaseModel):
     correo: str | None = Field(default=None, max_length=255)
     preventa_autorizada: PreventaIn | None = None  # autoriza (y reprecia sus sillas a preventa)
     quitar_preventa: bool = False  # revoca la autorización
+    cortesia_motivo: str | None = Field(default=None, max_length=255)  # obligatorio al agregar/cambiar sillas a cortesía
     notas: str | None = None
+
+    @field_validator("telefono_o_cuarto")
+    @classmethod
+    def _telefono_no_vacio(cls, v):
+        # Si se envía, no puede quedar en blanco (las reservaciones antiguas con "cuarto" siguen editables).
+        if v is not None and not v.strip():
+            raise ValueError("El teléfono no puede quedar vacío.")
+        return v
 
     @field_validator("correo")
     @classmethod
     def _correo_ok(cls, v):
-        return _validar_correo(v)
+        if v is not None:
+            return _validar_correo_obligatorio(v)  # si se envía: válido y no vacío
+        return v
 
     sillas_agregar: list[SillaIn] = Field(default_factory=list)
     sillas_quitar: list[int] = Field(default_factory=list)  # silla_id
@@ -182,6 +230,7 @@ class ReservacionPatch(BaseModel):
 
 class EventoIn(BaseModel):
     nombre: str | None = Field(default=None, min_length=1, max_length=120)
+    mensaje_confirmacion: str | None = Field(default=None, max_length=2000)
     fecha_evento: date | None = None
     corte_preventa: date | None = None
     iva_factor: float | None = Field(default=None, gt=0)
@@ -240,6 +289,19 @@ def _exigir_supervisor(evento: FiestaEvento, autorizacion: str | None) -> bool:
     return True
 
 
+def _es_supervisor() -> bool:
+    """¿Quien hace la petición puede autorizar cortesías por sí mismo? (sin login real, como antes, todo abierto)."""
+    if not settings.auth_enabled:
+        return True
+    actual = usuario_actual.get()
+    return actual is not None and tiene_capacidad(actual, "fiesta_supervisor")
+
+
+def _nombre_usuario() -> str | None:
+    actual = usuario_actual.get()
+    return (actual.get("nombre") or actual.get("email")) if actual else None
+
+
 async def _evento_activo(db: AsyncSession) -> FiestaEvento:
     res = await db.execute(
         select(FiestaEvento).where(FiestaEvento.activo.is_(True)).order_by(FiestaEvento.anio.desc()).limit(1)
@@ -264,6 +326,8 @@ def _opciones_reservacion():
         .selectinload(FiestaReservacionSilla.silla)
         .selectinload(FiestaSilla.mesa),
         selectinload(FiestaReservacion.pagos),
+        selectinload(FiestaReservacion.devoluciones),
+        selectinload(FiestaReservacion.solicitudes_cortesia),
     )
 
 
@@ -389,10 +453,36 @@ def _reparto_por_silla(reservacion: FiestaReservacion) -> dict[int, dict]:
     )
 
 
+def _devoluciones_dict(reservacion: FiestaReservacion) -> list[dict]:
+    return [{"importe": d.importe, "cancelada": d.cancelada, "fecha": d.fecha} for d in reservacion.devoluciones]
+
+
+def _solicitud_a_dict(s: FiestaSolicitudCortesia) -> dict:
+    return {
+        "id": s.id,
+        "reservacion_id": s.reservacion_id,
+        "silla_ids": _ids_de_texto(s.silla_ids),
+        "motivo": s.motivo,
+        "estado": s.estado,
+        "solicitado_por": s.solicitado_por or "",
+        "resuelto_por": s.resuelto_por or "",
+        "resuelto_en": s.resuelto_en,
+        "nota_resolucion": s.nota_resolucion or "",
+        "creado_en": s.creado_en,
+    }
+
+
 def _reservacion_a_dict(reservacion: FiestaReservacion) -> dict:
     calculo = _calculo(reservacion)
     reparto = _reparto_por_silla(reservacion)
+    por_autorizar = {
+        i for s in reservacion.solicitudes_cortesia if s.estado == "pendiente" for i in _ids_de_texto(s.silla_ids)
+    }
     return {
+        "cortesias_por_autorizar": sum(
+            1 for s in reservacion.sillas if s.activa and s.silla_id in por_autorizar
+        ),
+        "solicitudes_cortesia": [_solicitud_a_dict(s) for s in reservacion.solicitudes_cortesia],
         "id": reservacion.id,
         "cliente": reservacion.cliente,
         "telefono_o_cuarto": reservacion.telefono_o_cuarto or "",
@@ -402,12 +492,31 @@ def _reservacion_a_dict(reservacion: FiestaReservacion) -> dict:
             "por": reservacion.preventa_autorizada_por or "",
             "motivo": reservacion.preventa_motivo or "",
         },
+        "cortesia": {
+            "motivo": reservacion.cortesia_motivo or "",
+            "autorizada_por": reservacion.cortesia_autorizada_por or "",
+        },
         "notas": reservacion.notas or "",
         "fecha_venta": reservacion.fecha_venta,
         "capturado_por": reservacion.capturado_por or "",
         "estatus": reservacion.estatus,
         "motivo_cancelacion": reservacion.motivo_cancelacion or "",
         **calculo,
+        **calcular_por_devolver(calculo["excedente"], _devoluciones_dict(reservacion)),
+        "devoluciones": [
+            {
+                "id": d.id,
+                "importe": d.importe,
+                "fecha": d.fecha,
+                "forma_pago": d.forma_pago or "",
+                "referencia": d.referencia or "",
+                "motivo": d.motivo,
+                "capturado_por": d.capturado_por or "",
+                "autorizado_por": d.autorizado_por or "",
+                "cancelada": d.cancelada,
+            }
+            for d in reservacion.devoluciones
+        ],
         "sillas": sorted(
             (
                 {
@@ -418,6 +527,7 @@ def _reservacion_a_dict(reservacion: FiestaReservacion) -> dict:
                     "precio_aplicado": s.precio_aplicado,
                     "preventa": s.preventa,
                     "activa": s.activa,
+                    "por_autorizar": s.silla_id in por_autorizar,
                     # Reflejo por silla (Pago 1/2/3, Pagado, Saldo como en la hoja de mesa del Excel)
                     "pagado": reparto.get(s.silla_id, {}).get("pagado", 0.0),
                     "saldo": reparto.get(s.silla_id, {}).get("saldo", 0.0),
@@ -455,6 +565,7 @@ def _evento_a_dict(evento: FiestaEvento, precios: dict[str, tuple[float, float]]
         "iva_factor": evento.iva_factor,
         "propina_pct": evento.propina_pct,
         "total_contabilidad_al_dia": evento.total_contabilidad_al_dia,
+        "mensaje_confirmacion": evento.mensaje_confirmacion or "",
         "precios": [
             {"tipo": tipo, "precio_preventa": preventa, "precio_normal": normal}
             for tipo, (preventa, normal) in sorted(precios.items())
@@ -885,6 +996,37 @@ async def obtener_reservacion(
     return _reservacion_a_dict(await _cargar_reservacion(db, reservacion_id, evento.id))
 
 
+async def _crear_solicitud_cortesia(
+    db: AsyncSession,
+    evento: FiestaEvento,
+    reservacion: FiestaReservacion,
+    motivo: str,
+    silla_ids: list[int] | None = None,
+) -> FiestaSolicitudCortesia | None:
+    """Aparta las sillas de cortesía y avisa a los supervisores (aparece en su campana)."""
+    ids = silla_ids if silla_ids is not None else [
+        s.silla_id for s in reservacion.sillas if s.activa and s.tipo == "cortesia"
+    ]
+    if not ids:
+        return None
+    solicitud = FiestaSolicitudCortesia(
+        reservacion_id=reservacion.id,
+        silla_ids=_ids_a_texto(ids),
+        motivo=motivo,
+        estado="pendiente",
+        solicitado_por=_nombre_usuario(),
+    )
+    reservacion.solicitudes_cortesia.append(solicitud)
+    # Sin `reservacion=`: ahí se leerían relaciones perezosas (mesa de cada silla) y en async eso dispara un autoflush
+    # fuera del greenlet. El cliente va en el detalle y la mesa en el renglón "crear/editar" de la misma operación.
+    _bitacora(
+        db, evento, "cortesia_solicitada", "reservacion", reservacion.id, None,
+        f"{reservacion.cliente}: {len(ids)} silla(s) de cortesía por autorizar ({motivo})",
+        despues={"sillas": len(ids), "motivo": motivo},
+    )
+    return solicitud
+
+
 @router.post("/reservaciones", status_code=201)
 async def crear_reservacion(
     datos: ReservacionIn,
@@ -893,8 +1035,14 @@ async def crear_reservacion(
     autorizacion: str | None = Header(default=None, alias="X-Autorizacion"),
 ):
     evento = await _evento_activo(db)
+    hay_cortesia = any(s.tipo == "cortesia" for s in datos.sillas)
+    if hay_cortesia and len((datos.cortesia_motivo or "").strip()) < 3:
+        raise HTTPException(status_code=422, detail="Las cortesías llevan un motivo (mínimo 3 caracteres).")
     if datos.preventa_autorizada is not None:
-        _exigir_supervisor(evento, autorizacion)  # respetar la preventa después del corte lo autoriza el supervisor
+        # Respetar la preventa después del corte lo autoriza un supervisor (contraseña de un solo uso).
+        _exigir_supervisor(evento, autorizacion)
+    # Las cortesías no piden contraseña: un supervisor las da directo; una cajera las aparta y se avisa a un supervisor.
+    cortesia_directa = hay_cortesia and _es_supervisor()
     fecha_venta = datos.fecha_venta or date.today()
     reservacion = FiestaReservacion(
         evento_id=evento.id,
@@ -908,7 +1056,10 @@ async def crear_reservacion(
         preventa_autorizada=datos.preventa_autorizada is not None,
         preventa_autorizada_por=datos.preventa_autorizada.por if datos.preventa_autorizada else None,
         preventa_motivo=datos.preventa_autorizada.motivo if datos.preventa_autorizada else None,
-        sillas=[],  # colecciones inicializadas: en async no se puede cargar perezosamente
+        cortesia_motivo=datos.cortesia_motivo.strip() if hay_cortesia else None,
+        cortesia_autorizada_por=_nombre_usuario() if cortesia_directa else None,
+        sillas=[],
+        solicitudes_cortesia=[],  # colecciones inicializadas: en async no se puede cargar perezosamente
         pagos=[],
     )
     db.add(reservacion)
@@ -939,8 +1090,17 @@ async def crear_reservacion(
         f"{reservacion.cliente}: {len(datos.sillas)} sillas"
         + (f"; preventa autorizada por {datos.preventa_autorizada.por}: {datos.preventa_autorizada.motivo}" if datos.preventa_autorizada else ""),
         reservacion=reservacion,
-        despues={"cliente": reservacion.cliente, "sillas": len(datos.sillas), "telefono_o_cuarto": reservacion.telefono_o_cuarto},
+        despues={
+            "cliente": reservacion.cliente,
+            "sillas": len(datos.sillas),
+            "telefono_o_cuarto": reservacion.telefono_o_cuarto,
+            **({"cortesia_motivo": reservacion.cortesia_motivo} if hay_cortesia else {}),
+        },
     )
+    if hay_cortesia and not cortesia_directa:
+        # Después de la bitácora de "crear" (ver el comentario en `_crear_solicitud_cortesia`).
+        await _crear_solicitud_cortesia(db, evento, reservacion, datos.cortesia_motivo.strip())
+        await db.flush()
     return _reservacion_a_dict(await _cargar_reservacion(db, reservacion.id, evento.id))
 
 
@@ -954,20 +1114,46 @@ async def editar_reservacion(
 ):
     """Edita datos del cliente y agrega/libera sillas. Las sillas nuevas se cobran al precio de hoy."""
     evento = await _evento_activo(db)
-    # Autorizar/quitar la preventa y cambiar el tipo de boleto (cambia el precio cobrado) los autoriza el supervisor.
-    if datos.preventa_autorizada is not None or datos.quitar_preventa or datos.sillas_cambiar_tipo or datos.sillas_cambiar_precio:
+    # Sillas nuevas o cambiadas a cortesía: motivo obligatorio (se valida ANTES de gastar la autorización de un solo uso).
+    hay_cortesia_nueva = any(s.tipo == "cortesia" for s in datos.sillas_agregar) or any(
+        s.tipo == "cortesia" for s in datos.sillas_cambiar_tipo
+    )
+    if hay_cortesia_nueva and len((datos.cortesia_motivo or "").strip()) < 3:
+        raise HTTPException(status_code=422, detail="Las cortesías llevan un motivo (mínimo 3 caracteres).")
+    # Autorizar/quitar la preventa, cambiar el tipo de boleto (cambia el precio cobrado) y el precio manual lo autoriza
+    # el supervisor con su contraseña. Las cortesías NO piden contraseña: ver abajo.
+    cambia_tipo_normal = any(c.tipo != "cortesia" for c in datos.sillas_cambiar_tipo)
+    if (
+        datos.preventa_autorizada is not None or datos.quitar_preventa or cambia_tipo_normal
+        or datos.sillas_cambiar_precio
+    ):
         _exigir_supervisor(evento, autorizacion)
+    regala_existentes = any(c.tipo == "cortesia" for c in datos.sillas_cambiar_tipo)
+    if regala_existentes and not _es_supervisor():
+        raise HTTPException(
+            status_code=403,
+            detail="Convertir una silla ya vendida en cortesía lo hace un supervisor. Agrega una silla nueva de cortesía o pídeselo.",
+        )
+    agrega_cortesia = any(s.tipo == "cortesia" for s in datos.sillas_agregar)
+    cortesia_directa = hay_cortesia_nueva and _es_supervisor()
     reservacion = await _cargar_reservacion(db, reservacion_id, evento.id)
     if reservacion.estatus != "activa":
         raise HTTPException(status_code=409, detail="La reservación está cancelada.")
+    sillas_antes = {s.silla_id for s in reservacion.sillas if s.activa}
 
     cambios = datos.model_dump(
         exclude_unset=True,
         exclude={
             "sillas_agregar", "sillas_quitar", "sillas_cambiar_tipo", "sillas_cambiar_precio",
-            "capturado_por", "preventa_autorizada", "quitar_preventa",
+            "capturado_por", "preventa_autorizada", "quitar_preventa", "cortesia_motivo",
         },
     )
+    if hay_cortesia_nueva:
+        # Se acumulan los motivos si ya había cortesías en la reservación.
+        nuevo_motivo = datos.cortesia_motivo.strip()
+        reservacion.cortesia_motivo = f"{reservacion.cortesia_motivo} | {nuevo_motivo}"[:255] if reservacion.cortesia_motivo else nuevo_motivo
+        if cortesia_directa:
+            reservacion.cortesia_autorizada_por = _nombre_usuario() or reservacion.cortesia_autorizada_por
     for campo, valor in cambios.items():
         setattr(reservacion, campo, valor.strip() if campo == "cliente" and valor else valor)
 
@@ -1055,8 +1241,16 @@ async def editar_reservacion(
             "sillas_agregadas": [s.silla_id for s in datos.sillas_agregar],
             "sillas_quitadas": datos.sillas_quitar,
             "cambio_de_tipo": [{"silla_id": c.silla_id, "tipo": c.tipo} for c in datos.sillas_cambiar_tipo],
+            **({"cortesia_motivo": datos.cortesia_motivo} if hay_cortesia_nueva else {}),
         },
     )
+    if agrega_cortesia and not cortesia_directa:
+        nuevas = [
+            s.silla_id for s in reservacion.sillas
+            if s.activa and s.tipo == "cortesia" and s.silla_id not in sillas_antes
+        ]
+        await _crear_solicitud_cortesia(db, evento, reservacion, datos.cortesia_motivo.strip(), nuevas)
+        await db.flush()
     return _reservacion_a_dict(await _cargar_reservacion(db, reservacion.id, evento.id))
 
 
@@ -1512,6 +1706,122 @@ async def cancelar_pago(
     return _reservacion_a_dict(reservacion)
 
 
+# ── Devoluciones y confirmación al cliente ──────────────────────────────────
+
+
+class DevolucionIn(BaseModel):
+    importe: float = Field(gt=0)
+    fecha: date | None = None
+    forma_pago: str | None = Field(default=None, max_length=30)
+    referencia: str | None = Field(default=None, max_length=80)
+    motivo: str = Field(min_length=3, max_length=255)
+    capturado_por: str | None = Field(default=None, max_length=80)
+
+
+@router.post("/reservaciones/{reservacion_id}/devoluciones", status_code=201)
+async def registrar_devolucion(
+    reservacion_id: int,
+    datos: DevolucionIn,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+    autorizacion: str | None = Header(default=None, alias="X-Autorizacion"),
+):
+    """
+    Registra dinero que se le regresó al cliente. Solo se puede devolver lo que sobra o ya no corresponde:
+    lo cobrado de una reservación CANCELADA, o el excedente de una activa. Lo autoriza un supervisor.
+    """
+    evento = await _evento_activo(db)
+    reservacion = await _cargar_reservacion(db, reservacion_id, evento.id)
+    calculo = _calculo(reservacion)
+    por_devolver = calcular_por_devolver(calculo["excedente"], _devoluciones_dict(reservacion))["por_devolver"]
+    if datos.importe > por_devolver + 0.005:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Solo hay ${por_devolver:,.2f} por devolver en esta reservación."
+                if por_devolver > 0
+                else "No hay dinero por devolver: la reservación no tiene excedente ni está cancelada con pagos."
+            ),
+        )
+    _exigir_supervisor(evento, autorizacion)  # después de validar, para no gastar la autorización de un solo uso
+    devolucion = FiestaDevolucion(
+        reservacion_id=reservacion.id,
+        importe=round(datos.importe, 2),
+        fecha=datos.fecha or date.today(),
+        forma_pago=datos.forma_pago,
+        referencia=datos.referencia,
+        motivo=datos.motivo.strip(),
+        capturado_por=_capturista(datos.capturado_por),
+        autorizado_por=autorizo_por.get(),
+    )
+    db.add(devolucion)
+    reservacion.devoluciones.append(devolucion)
+    await db.flush()
+    _bitacora(
+        db, evento, "devolucion", "reservacion", reservacion.id, datos.capturado_por,
+        f"{reservacion.cliente}: ${datos.importe:,.2f} ({datos.forma_pago or 's/forma'}) — {datos.motivo.strip()}",
+        reservacion=reservacion,
+        antes={"por_devolver": por_devolver},
+        despues={"importe": devolucion.importe, "forma_pago": datos.forma_pago, "fecha": devolucion.fecha, "motivo": devolucion.motivo},
+    )
+    return _reservacion_a_dict(await _cargar_reservacion(db, reservacion.id, evento.id))
+
+
+@router.delete("/devoluciones/{devolucion_id}")
+async def cancelar_devolucion(
+    devolucion_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+    autorizacion: str | None = Header(default=None, alias="X-Autorizacion"),
+):
+    """Anula una devolución capturada por error (vuelve a quedar por devolver). Lo autoriza un supervisor."""
+    evento = await _evento_activo(db)
+    res = await db.execute(
+        select(FiestaDevolucion)
+        .join(FiestaReservacion, FiestaReservacion.id == FiestaDevolucion.reservacion_id)
+        .where(FiestaDevolucion.id == devolucion_id, FiestaReservacion.evento_id == evento.id)
+    )
+    devolucion = res.scalar_one_or_none()
+    if devolucion is None:
+        raise HTTPException(status_code=404, detail="Devolución no encontrada")
+    if devolucion.cancelada:
+        raise HTTPException(status_code=409, detail="La devolución ya estaba anulada.")
+    _exigir_supervisor(evento, autorizacion)
+    devolucion.cancelada = True
+    reservacion = await _cargar_reservacion(db, devolucion.reservacion_id, evento.id)
+    _bitacora(
+        db, evento, "cancelar_devolucion", "reservacion", reservacion.id, None,
+        f"{reservacion.cliente}: ${devolucion.importe:,.2f}",
+        reservacion=reservacion,
+        antes={"importe": devolucion.importe, "fecha": devolucion.fecha, "cancelada": False},
+        despues={"cancelada": True},
+    )
+    await db.flush()
+    return _reservacion_a_dict(await _cargar_reservacion(db, reservacion.id, evento.id))
+
+
+class ConfirmacionIn(BaseModel):
+    canal: Literal["correo", "whatsapp", "copiado"]
+
+
+@router.post("/reservaciones/{reservacion_id}/confirmacion")
+async def registrar_confirmacion(
+    reservacion_id: int,
+    datos: ConfirmacionIn,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+):
+    """Deja constancia (quién y cuándo) de que se mandó la confirmación al cliente. El envío lo hace la cajera."""
+    evento = await _evento_activo(db)
+    reservacion = await _cargar_reservacion(db, reservacion_id, evento.id)
+    _bitacora(
+        db, evento, "confirmacion", "reservacion", reservacion.id, None,
+        f"{reservacion.cliente}: confirmación por {datos.canal}",
+        reservacion=reservacion, despues={"canal": datos.canal},
+    )
+    return {"ok": True, "canal": datos.canal}
+
+
 # ── Resumen, cobros y bitácora ──────────────────────────────────────────────
 
 
@@ -1528,10 +1838,17 @@ async def obtener_resumen(
 
     reservaciones = []
     for r in await _reservaciones_evento(db, evento.id, solo_activas=True):
+        por_silla = _reparto_por_silla(r)  # lo pagado se refleja silla por silla, no por reservación
         reservaciones.append(
             {
                 "sillas": [
-                    {"tipo": s.tipo, "precio_aplicado": s.precio_aplicado, "preventa": s.preventa, "activa": s.activa}
+                    {
+                        "tipo": s.tipo,
+                        "precio_aplicado": s.precio_aplicado,
+                        "preventa": s.preventa,
+                        "activa": s.activa,
+                        "estado_pago": por_silla.get(s.silla_id, {}).get("estado"),
+                    }
                     for s in r.sillas
                 ],
                 **_calculo(r),
@@ -1559,7 +1876,10 @@ async def obtener_resumen(
     ]
 
     resumen = construir_resumen(reservaciones, capacidad, historico=historico, fecha_corte=corte)
-    cobrado = (await _cobros(db, evento))["total"]
+    cobros = await _cobros(db, evento)
+    cobrado = cobros["neto"]  # lo que realmente quedó cobrado (restando devoluciones)
+    resumen["dinero"]["devuelto"] = cobros["devuelto"]
+    resumen["dinero"]["neto"] = cobros["neto"]
     resumen["fecha_corte"] = corte
     resumen["anio_comparativo"] = anio_base
     resumen["fiscal"] = desglose_fiscal(cobrado, evento.iva_factor, evento.propina_pct)
@@ -1577,7 +1897,13 @@ async def _cobros(db: AsyncSession, evento: FiestaEvento) -> dict:
         {"fecha": p.fecha, "importe": p.importe, "forma_pago": p.forma_pago}
         for p in res.scalars().all()
     ]
-    return construir_cobros(pagos, evento.iva_factor)
+    dev = await db.execute(
+        select(FiestaDevolucion)
+        .join(FiestaReservacion, FiestaReservacion.id == FiestaDevolucion.reservacion_id)
+        .where(FiestaReservacion.evento_id == evento.id, FiestaDevolucion.cancelada.is_(False))
+    )
+    devoluciones = [{"importe": d.importe, "cancelada": d.cancelada} for d in dev.scalars().all()]
+    return construir_cobros(pagos, evento.iva_factor, devoluciones)
 
 
 @router.get("/historico")
@@ -1604,6 +1930,33 @@ async def obtener_historico(
         for h in res.scalars().all()
     ]
     return {"anio": anio, "filas": filas, "disponible_para_cargar": anio in HISTORICO}
+
+
+@router.get("/historico/pagos")
+async def obtener_historico_pagos(
+    anio: int | None = Query(default=None, description="Por defecto, el año anterior al del evento"),
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+):
+    """Boletos de una edición anterior con la fecha y el monto de cada pago (niños y, cuando se carguen, adultos):
+    por día, cuántos se reservaron y cuánto dinero entró. Sale de `fiesta_fin_anio_historico_pagos.py`."""
+    evento_anio = anio or ((await _evento_activo(db)).anio - 1)
+    fuente = HISTORICO_PAGOS.get(evento_anio, {})
+    resultado: dict[str, dict] = {}
+    por_fecha: dict[str, dict] = {}
+    for tipo in ("nino", "adulto"):
+        resumen = resumir_pagos_historicos(fuente.get(tipo, []))
+        resultado[tipo] = {"boletos": resumen["boletos"], "cobrado": resumen["cobrado"], "disponible": resumen["boletos"] > 0, "con_dinero": tipo in TIPOS_CON_DINERO}
+        for fecha, v in resumen["dias"].items():
+            por_fecha.setdefault(fecha.isoformat(), {})[tipo] = v
+    esperados = NINOS_ESPERADOS.get(evento_anio)
+    return {
+        "anio": evento_anio,
+        "tipos": resultado,
+        "dias": [{"fecha": f, **v} for f, v in sorted(por_fecha.items())],
+        "ninos_esperados": esperados,
+        "ninos_cuadran": esperados is None or resultado["nino"]["boletos"] == esperados,
+    }
 
 
 class CierreIn(BaseModel):
@@ -1695,6 +2048,7 @@ async def obtener_cobros(db: AsyncSession = Depends(get_db), _user: dict = Depen
                 "fecha_venta": r.fecha_venta,
                 "cancelada": r.estatus == "cancelada",
                 "cancelado_en": r.cancelado_en.date() if r.cancelado_en else None,
+                "devoluciones": [{"fecha": d.fecha, "importe": d.importe, "cancelada": d.cancelada} for d in r.devoluciones],
                 "sillas": [
                     {
                         "silla_id": s.silla_id,
@@ -1758,6 +2112,123 @@ async def guardar_poliza_dia(
     await db.flush()
     _bitacora(db, evento, "poliza_dia", "cobros", None, datos.capturado_por, f"{fecha}: {antes} → {datos.importe}")
     return {"fecha": fecha, "importe": datos.importe}
+
+
+class ResolverCortesiaIn(BaseModel):
+    nota: str | None = Field(default=None, max_length=255)
+
+
+async def _solicitud_con_reservacion(
+    db: AsyncSession, evento: FiestaEvento, solicitud_id: int
+) -> tuple[FiestaSolicitudCortesia, FiestaReservacion]:
+    res = await db.execute(
+        select(FiestaSolicitudCortesia)
+        .join(FiestaReservacion, FiestaReservacion.id == FiestaSolicitudCortesia.reservacion_id)
+        .where(FiestaSolicitudCortesia.id == solicitud_id, FiestaReservacion.evento_id == evento.id)
+    )
+    solicitud = res.scalar_one_or_none()
+    if solicitud is None:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
+    return solicitud, await _cargar_reservacion(db, solicitud.reservacion_id, evento.id)
+
+
+def _solicitud_detallada(solicitud: FiestaSolicitudCortesia, reservacion: FiestaReservacion) -> dict:
+    ids = set(_ids_de_texto(solicitud.silla_ids))
+    sillas = sorted(
+        (s.silla.mesa.numero, s.silla.numero) for s in reservacion.sillas if s.silla_id in ids
+    )
+    return {
+        **_solicitud_a_dict(solicitud),
+        "cliente": reservacion.cliente,
+        "sillas": [{"mesa": m, "silla": n} for m, n in sillas],
+        "reservacion_estatus": reservacion.estatus,
+    }
+
+
+@router.get("/solicitudes-cortesia")
+async def listar_solicitudes_cortesia(
+    estado: str | None = Query(default="pendiente", pattern="^(pendiente|aprobada|rechazada)$"),
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(requiere_capacidad("fiesta_supervisor")),
+):
+    """Campana del supervisor: cortesías que las cajeras apartaron y esperan autorización (más antiguas primero)."""
+    evento = await _evento_activo(db)
+    consulta = (
+        select(FiestaSolicitudCortesia.id)
+        .join(FiestaReservacion, FiestaReservacion.id == FiestaSolicitudCortesia.reservacion_id)
+        .where(FiestaReservacion.evento_id == evento.id)
+        .order_by(FiestaSolicitudCortesia.id.desc() if estado != "pendiente" else FiestaSolicitudCortesia.id)
+        .limit(100)
+    )
+    if estado:
+        consulta = consulta.where(FiestaSolicitudCortesia.estado == estado)
+    filas = []
+    for solicitud_id in (await db.execute(consulta)).scalars().all():
+        solicitud, reservacion = await _solicitud_con_reservacion(db, evento, solicitud_id)
+        if solicitud.estado == "pendiente":
+            ids = set(_ids_de_texto(solicitud.silla_ids))
+            if not any(s.activa and s.silla_id in ids and s.tipo == "cortesia" for s in reservacion.sillas):
+                # La cajera canceló la reservación o liberó esas sillas: ya no hay nada que autorizar.
+                solicitud.estado = "rechazada"
+                solicitud.resuelto_en = datetime.now(timezone.utc)
+                solicitud.nota_resolucion = "Se canceló o se liberaron las sillas antes de resolverla"
+                continue
+        filas.append(_solicitud_detallada(solicitud, reservacion))
+    return {"solicitudes": filas, "total": len(filas)}
+
+
+async def _resolver_cortesia(
+    db: AsyncSession, solicitud_id: int, aprobar: bool, nota: str | None
+) -> dict:
+    evento = await _evento_activo(db)
+    solicitud, reservacion = await _solicitud_con_reservacion(db, evento, solicitud_id)
+    if solicitud.estado != "pendiente":
+        raise HTTPException(status_code=409, detail=f"Esta solicitud ya fue {solicitud.estado} por {solicitud.resuelto_por or 'alguien más'}.")
+    quien = _nombre_usuario()
+    solicitud.estado = "aprobada" if aprobar else "rechazada"
+    solicitud.resuelto_por = quien
+    solicitud.resuelto_en = datetime.now(timezone.utc)
+    solicitud.nota_resolucion = (nota or "").strip() or None
+    ids = set(_ids_de_texto(solicitud.silla_ids))
+    afectadas = [s for s in reservacion.sillas if s.activa and s.silla_id in ids and s.tipo == "cortesia"]
+    if aprobar:
+        reservacion.cortesia_autorizada_por = quien or reservacion.cortesia_autorizada_por
+        accion, texto = "cortesia_aprobada", f"{reservacion.cliente}: {len(afectadas)} silla(s) de cortesía autorizadas ({solicitud.motivo})"
+    else:
+        for s in afectadas:
+            s.activa = False  # se liberan las sillas apartadas
+        if reservacion.estatus == "activa" and not any(s.activa for s in reservacion.sillas):
+            reservacion.estatus = "cancelada"
+            reservacion.motivo_cancelacion = "Cortesía rechazada por el supervisor"
+            reservacion.cancelado_en = datetime.now(timezone.utc)
+        accion, texto = "cortesia_rechazada", f"{reservacion.cliente}: {len(afectadas)} silla(s) de cortesía rechazadas y liberadas ({solicitud.motivo})"
+    _bitacora(
+        db, evento, accion, "reservacion", reservacion.id, None, texto + (f" — {solicitud.nota_resolucion}" if solicitud.nota_resolucion else ""),
+        reservacion=reservacion,
+        despues={"estado": solicitud.estado, "sillas": len(afectadas), "motivo": solicitud.motivo},
+    )
+    await db.flush()
+    return _reservacion_a_dict(await _cargar_reservacion(db, reservacion.id, evento.id))
+
+
+@router.post("/solicitudes-cortesia/{solicitud_id}/aprobar")
+async def aprobar_cortesia(
+    solicitud_id: int,
+    datos: ResolverCortesiaIn | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(requiere_capacidad("fiesta_supervisor")),
+):
+    return await _resolver_cortesia(db, solicitud_id, True, datos.nota if datos else None)
+
+
+@router.post("/solicitudes-cortesia/{solicitud_id}/rechazar")
+async def rechazar_cortesia(
+    solicitud_id: int,
+    datos: ResolverCortesiaIn | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(requiere_capacidad("fiesta_supervisor")),
+):
+    return await _resolver_cortesia(db, solicitud_id, False, datos.nota if datos else None)
 
 
 @router.get("/bitacora")

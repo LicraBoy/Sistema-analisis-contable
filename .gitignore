@@ -65,3 +65,11 @@ docs/*.png
 docs/*.xlsx
 docs/*.xls
 docs/reporte de revision de produccion y ventas de Carnes y Mariscos/
+
+# paquete de datos para el servidor (datos reales)
+paquete_servidor/
+
+# perfiles de navegador de las pruebas E2E
+scripts/qa/edge_*/
+scripts/qa/*.png
+scripts/qa/*.log

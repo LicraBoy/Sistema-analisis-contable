@@ -18,7 +18,8 @@ param(
     [string]$Argumentos = "",
     [Parameter(Mandatory = $true)][string]$Url,
     [int]$EsperaArranqueSeg = 45,
-    [int]$MaxReintentosArranque = 6
+    [int]$MaxReintentosArranque = 6,
+    [int]$RespaldoCadaMin = 0   # >0: ejecuta scripts\respaldar_bd.py cada tantos minutos mientras el servidor está vivo
 )
 
 $ErrorActionPreference = "Continue"
@@ -74,6 +75,23 @@ function Arrancar() {
     return $null
 }
 
+$ultimoRespaldo = Get-Date
+$procRespaldo = $null
+function RespaldoPeriodico() {
+    if ($RespaldoCadaMin -le 0) { return }
+    # Un respaldo colgado (python a veces se cuelga al iniciar) se mata a los 3 min para no acumular procesos.
+    if ($null -ne $script:procRespaldo -and -not $script:procRespaldo.HasExited) {
+        if (((Get-Date) - $script:ultimoRespaldo).TotalMinutes -gt 3) { Escribir "Respaldo colgado: se cancela."; Matar $script:procRespaldo; $script:procRespaldo = $null }
+        return
+    }
+    if (((Get-Date) - $script:ultimoRespaldo).TotalMinutes -lt $RespaldoCadaMin) { return }
+    $script:ultimoRespaldo = Get-Date
+    $py = Join-Path $raiz "backend\.venv\Scripts\python.exe"
+    $script:procRespaldo = Start-Process -FilePath $py -ArgumentList "`"$(Join-Path $raiz 'scripts\respaldar_bd.py')`"" -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $logs "respaldo.log") -RedirectStandardError (Join-Path $logs "respaldo.err.log")
+    Escribir "Respaldo automático iniciado."
+}
+
 Escribir "Vigilante iniciado. Salud: $Url"
 while ($true) {
     $proc = Arrancar
@@ -85,6 +103,7 @@ while ($true) {
     $fallos = 0
     while ($true) {
         Start-Sleep -Seconds 15
+        RespaldoPeriodico
         if ($proc.HasExited) { Escribir "El proceso se cayó (código $($proc.ExitCode)). Reiniciando..."; break }
         if (Responde) { $fallos = 0; continue }
         $fallos++

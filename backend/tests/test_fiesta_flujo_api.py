@@ -19,6 +19,7 @@ pytestmark = pytest.mark.anyio
 
 PREFIJO = "/fiesta-fin-anio"
 HOY = date.today().isoformat()
+CONTACTO = {"telefono_o_cuarto": "669 123 4567", "correo": "cliente@correo.com"}
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ async def _reservar(c, cliente, tipos, **extra):
     ids = await _sillas_libres(c, len(tipos))
     r = await c.post(
         f"{PREFIJO}/reservaciones",
-        json={"cliente": cliente, "sillas": [{"silla_id": i, "tipo": t} for i, t in zip(ids, tipos)], "fecha_venta": HOY, **extra},
+        json={"cliente": cliente, **CONTACTO, "sillas": [{"silla_id": i, "tipo": t} for i, t in zip(ids, tipos)], "fecha_venta": HOY, **extra},
     )
     return r, ids
 
@@ -81,7 +82,7 @@ async def test_flujo_completo_con_auditoria(api):
     assert res["importe"] == pytest.approx(2000 + 2000 + 1000)
 
     # 2) doble venta de la misma silla → 409 con mensaje claro
-    r2 = await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "Otra", "sillas": [{"silla_id": ids[0], "tipo": "adulto"}], "fecha_venta": HOY})
+    r2 = await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "Otra", **CONTACTO, "sillas": [{"silla_id": ids[0], "tipo": "adulto"}], "fecha_venta": HOY})
     assert r2.status_code == 409 and "silla" in r2.json()["detail"].lower()
 
     # 3) cobro con 2 formas de pago aplicado a las 3 sillas → UN solo "Pago 1" por silla
@@ -148,12 +149,12 @@ async def test_validaciones_no_dan_500(api):
     assert (await c.post(f"{PREFIJO}/reservaciones/99999/pagos", json={"importe": 10})).status_code == 404
     assert (await c.patch(f"{PREFIJO}/pagos/99999", json={"importe": 10})).status_code == 404
     assert (await c.delete(f"{PREFIJO}/pagos/99999")).status_code == 404
-    bad = await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", "sillas": [{"silla_id": 999999, "tipo": "adulto"}], "fecha_venta": HOY})
+    bad = await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", **CONTACTO, "sillas": [{"silla_id": 999999, "tipo": "adulto"}], "fecha_venta": HOY})
     assert bad.status_code in (400, 404, 409, 422)
     # reservación sin sillas / tipo inválido / correo inválido
-    assert (await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", "sillas": []})).status_code == 422
-    assert (await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", "sillas": [{"silla_id": ids[0], "tipo": "vip"}]})).status_code == 422
-    assert (await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", "correo": "no-es-correo", "sillas": [{"silla_id": 1, "tipo": "adulto"}]})).status_code == 422
+    assert (await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", **CONTACTO, "sillas": []})).status_code == 422
+    assert (await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", **CONTACTO, "sillas": [{"silla_id": ids[0], "tipo": "vip"}]})).status_code == 422
+    assert (await c.post(f"{PREFIJO}/reservaciones", json={"cliente": "X", "telefono_o_cuarto": "6691234567", "correo": "no-es-correo", "sillas": [{"silla_id": 1, "tipo": "adulto"}]})).status_code == 422
     # abonar a una reservación cancelada
     await c.delete(f"{PREFIJO}/reservaciones/{rid}")
     assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 10})).status_code == 409
@@ -164,7 +165,7 @@ async def test_validaciones_no_dan_500(api):
 
 async def test_humo_de_todas_las_lecturas_de_la_fiesta(api):
     c, _ = api
-    r, _ = await _reservar(c, "Humo", ["adulto", "cortesia"])
+    r, _ = await _reservar(c, "Humo", ["adulto", "cortesia"], cortesia_motivo="Invitado del hotel")
     rid = r.json()["id"]
     await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 500, "forma_pago": "Efectivo"})
     rutas = [
@@ -225,7 +226,7 @@ async def test_varias_cajas_reservando_la_misma_silla_solo_una_gana(tmp_path, mo
                 {"tipo": "cortesia", "precio_preventa": 0, "precio_normal": 0},
             ])
             ids = await _sillas_libres(c, 1)
-            cuerpo = lambda n: {"cliente": n, "sillas": [{"silla_id": ids[0], "tipo": "adulto"}], "fecha_venta": HOY}
+            cuerpo = lambda n: {"cliente": n, **CONTACTO, "sillas": [{"silla_id": ids[0], "tipo": "adulto"}], "fecha_venta": HOY}
             respuestas = await asyncio.gather(*[c.post(f"{PREFIJO}/reservaciones", json=cuerpo(f"Caja {i}")) for i in range(6)])
             codigos = sorted(r.status_code for r in respuestas)
             assert codigos == [201, 409, 409, 409, 409, 409], codigos
@@ -250,7 +251,201 @@ async def test_precio_cambia_de_preventa_a_normal_solo_en_ventas_futuras(api):
 
 async def test_cortesia_cuesta_cero_y_no_pide_pago(api):
     c, _ = api
-    r, _ = await _reservar(c, "Cortesia", ["cortesia", "cortesia"])
+    r, _ = await _reservar(c, "Cortesia", ["cortesia", "cortesia"], cortesia_motivo="Patrocinador del evento")
     assert r.status_code == 201
+    assert r.json()["cortesia"]["motivo"] == "Patrocinador del evento"
     assert r.json()["importe"] == 0
     assert r.json()["estado"] == "cortesia"
+
+
+async def test_reservar_exige_nombre_telefono_y_correo(api):
+    c, _ = api
+    ids = await _sillas_libres(c, 1)
+    base = {"sillas": [{"silla_id": ids[0], "tipo": "adulto"}], "fecha_venta": HOY}
+    completo = {"cliente": "Maria Lopez", "telefono_o_cuarto": "669 123 4567", "correo": "maria@correo.com"}
+    # cada dato faltante, vacío o inválido → 422 y NO se aparta la silla
+    invalidos = [
+        {**completo, "cliente": ""}, {**completo, "cliente": "   "}, {**completo, "cliente": "A"},
+        {k: v for k, v in completo.items() if k != "telefono_o_cuarto"}, {**completo, "telefono_o_cuarto": ""},
+        {**completo, "telefono_o_cuarto": "12345"}, {**completo, "telefono_o_cuarto": "abc"},
+        {k: v for k, v in completo.items() if k != "correo"}, {**completo, "correo": ""}, {**completo, "correo": "no-es-correo"},
+    ]
+    for datos in invalidos:
+        r = await c.post(f"{PREFIJO}/reservaciones", json={**base, **datos})
+        assert r.status_code == 422, (datos, r.status_code, r.text[:120])
+    assert (await _sillas_libres(c, 1)) == ids  # la silla sigue libre
+    ok = await c.post(f"{PREFIJO}/reservaciones", json={**base, **completo})
+    assert ok.status_code == 201
+    det = ok.json()
+    assert det["cliente"] == "Maria Lopez" and det["telefono_o_cuarto"] == "669 123 4567" and det["correo"] == "maria@correo.com"
+    # al editar no se pueden dejar en blanco
+    rid = det["id"]
+    assert (await c.patch(f"{PREFIJO}/reservaciones/{rid}", json={"correo": ""})).status_code == 422
+    assert (await c.patch(f"{PREFIJO}/reservaciones/{rid}", json={"telefono_o_cuarto": "  "})).status_code == 422
+    assert (await c.patch(f"{PREFIJO}/reservaciones/{rid}", json={"notas": "solo notas"})).status_code == 200
+
+
+async def test_resumen_cuenta_pagadas_y_anticipos_por_silla(api):
+    """Una silla pagada completa dentro de una reservación con otras sillas sin pagar debe contar como PAGADA en el Resumen."""
+    c, _ = api
+    r, ids = await _reservar(c, "Resumen por silla", ["adulto", "adulto", "adulto"])  # 2000 c/u
+    rid = r.json()["id"]
+    p1 = await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 2000, "forma_pago": "Efectivo", "fecha": HOY, "silla_ids": [ids[0]]})
+    assert p1.status_code == 201
+    p2 = await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 500, "forma_pago": "Efectivo", "fecha": HOY, "silla_ids": [ids[1]]})
+    assert p2.status_code == 201
+    estado = (await c.get(f"{PREFIJO}/resumen")).json()["estado"]
+    assert (estado["pagadas"], estado["anticipos"], estado["sin_anticipo"]) == (1, 1, 1)
+    # coincide con "cómo vamos al día" de Cobros (que ya contaba por silla)
+    dia = next(d for d in (await c.get(f"{PREFIJO}/cobros")).json()["dias"] if d["fecha"] == HOY)
+    assert (dia["reservas"]["pagadas"], dia["reservas"]["anticipos"], dia["reservas"]["sin_anticipo"]) == (1, 1, 1)
+
+
+async def test_cortesia_sin_motivo_se_rechaza_y_no_aparta_la_silla(api):
+    c, _ = api
+    ids = await _sillas_libres(c, 1)
+    sin_motivo = await _reservar(c, "Regalo", ["cortesia"])
+    assert sin_motivo[0].status_code == 422 and "motivo" in sin_motivo[0].json()["detail"].lower()
+    corto = await _reservar(c, "Regalo", ["cortesia"], cortesia_motivo="ab")
+    assert corto[0].status_code == 422
+    assert (await _sillas_libres(c, 1)) == ids  # nada quedó apartado
+    ok = await _reservar(c, "Regalo", ["adulto", "cortesia"], cortesia_motivo="Cortesía de gerencia")
+    assert ok[0].status_code == 201
+    # agregar una cortesía después también exige motivo
+    rid = ok[0].json()["id"]
+    libre = (await _sillas_libres(c, 1))[0]
+    r1 = await c.patch(f"{PREFIJO}/reservaciones/{rid}", json={"sillas_agregar": [{"silla_id": libre, "tipo": "cortesia"}]})
+    assert r1.status_code == 422
+    r2 = await c.patch(f"{PREFIJO}/reservaciones/{rid}", json={"sillas_agregar": [{"silla_id": libre, "tipo": "cortesia"}], "cortesia_motivo": "Otra cortesía"})
+    assert r2.status_code == 200 and "Otra cortesía" in r2.json()["cortesia"]["motivo"]
+    # y queda en la auditoría con su motivo
+    aud = (await c.get(f"{PREFIJO}/auditoria", params={"reservacion_id": rid})).json()
+    assert any((f["despues"] or {}).get("cortesia_motivo") for f in aud["filas"])
+
+
+async def test_cortesia_de_cajera_queda_por_autorizar_y_el_supervisor_la_resuelve(api, monkeypatch):
+    from app.api import fiesta_fin_anio as modulo
+
+    c, _ = api
+    monkeypatch.setattr(modulo, "_es_supervisor", lambda: False)  # quien captura es una cajera
+    r, _ = await _reservar(c, "Invitado", ["adulto", "cortesia"], cortesia_motivo="Invitado del gerente")
+    assert r.status_code == 201
+    rid = r.json()["id"]
+    assert r.json()["cortesias_por_autorizar"] == 1 and r.json()["cortesia"]["autorizada_por"] == ""
+    assert sum(1 for s in r.json()["sillas"] if s["por_autorizar"]) == 1
+
+    pendientes = (await c.get(f"{PREFIJO}/solicitudes-cortesia")).json()["solicitudes"]
+    assert len(pendientes) == 1 and pendientes[0]["motivo"] == "Invitado del gerente" and pendientes[0]["cliente"] == "Invitado"
+
+    ok = await c.post(f"{PREFIJO}/solicitudes-cortesia/{pendientes[0]['id']}/aprobar")
+    assert ok.status_code == 200 and ok.json()["cortesias_por_autorizar"] == 0
+    assert (await c.get(f"{PREFIJO}/solicitudes-cortesia")).json()["total"] == 0
+    # ya resuelta: no se puede resolver otra vez (otro supervisor se adelantó)
+    assert (await c.post(f"{PREFIJO}/solicitudes-cortesia/{pendientes[0]['id']}/rechazar")).status_code == 409
+
+    # rechazar libera las sillas y, si era todo lo que tenía la reservación, la cancela
+    libres_antes = await _sillas_libres(c, 1)
+    r2, _ = await _reservar(c, "Solo cortesia", ["cortesia"], cortesia_motivo="Por compromiso")
+    sol = (await c.get(f"{PREFIJO}/solicitudes-cortesia")).json()["solicitudes"][0]
+    no = await c.post(f"{PREFIJO}/solicitudes-cortesia/{sol['id']}/rechazar", json={"nota": "No aplica"})
+    assert no.status_code == 200 and no.json()["estatus"] == "cancelada"
+    assert await _sillas_libres(c, 1) == libres_antes
+    aud = (await c.get(f"{PREFIJO}/auditoria", params={"reservacion_id": rid})).json()
+    assert {f["accion"] for f in aud["filas"]} >= {"cortesia_solicitada", "cortesia_aprobada"}
+
+
+async def test_solicitud_de_cortesia_desaparece_si_la_cajera_cancela_la_reservacion(api, monkeypatch):
+    from app.api import fiesta_fin_anio as modulo
+
+    c, _ = api
+    monkeypatch.setattr(modulo, "_es_supervisor", lambda: False)
+    r, _ = await _reservar(c, "Se arrepiente", ["cortesia"], cortesia_motivo="Prueba")
+    assert (await c.get(f"{PREFIJO}/solicitudes-cortesia")).json()["total"] == 1
+    assert (await c.delete(f"{PREFIJO}/reservaciones/{r.json()['id']}", params={"motivo": "ya no"})).status_code == 200
+    assert (await c.get(f"{PREFIJO}/solicitudes-cortesia")).json()["total"] == 0
+
+
+async def test_devoluciones_solo_de_lo_que_sobra_y_restan_de_cobros(api):
+    c, _ = api
+    r, _ = await _reservar(c, "Se arrepintio", ["adulto", "adulto"])  # 2 x 2000
+    rid = r.json()["id"]
+    await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 1500, "forma_pago": "Efectivo", "fecha": HOY})
+    # activa y sin excedente: no hay nada que devolver
+    r0 = await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 100, "motivo": "prueba"})
+    assert r0.status_code == 409
+    # cancelar la reservación deja los 1500 por devolver
+    assert (await c.delete(f"{PREFIJO}/reservaciones/{rid}", params={"motivo": "cliente desistió"})).status_code == 200
+    asi = (await c.get(f"{PREFIJO}/reservaciones/{rid}")).json()
+    assert asi["por_devolver"] == pytest.approx(1500) and asi["devuelto"] == 0
+    # validaciones
+    assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 0, "motivo": "x1234"})).status_code == 422
+    assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 100})).status_code == 422  # sin motivo
+    assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 1600, "motivo": "de más"})).status_code == 409
+    # devolución parcial y luego el resto
+    d1 = await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 1000, "forma_pago": "Efectivo", "fecha": HOY, "motivo": "reembolso parcial"})
+    assert d1.status_code == 201
+    assert d1.json()["devuelto"] == pytest.approx(1000) and d1.json()["por_devolver"] == pytest.approx(500)
+    cobros = (await c.get(f"{PREFIJO}/cobros")).json()
+    assert cobros["total"] == pytest.approx(1500) and cobros["devuelto"] == pytest.approx(1000) and cobros["neto"] == pytest.approx(500)
+    dia = next(d for d in cobros["dias"] if d["fecha"] == HOY)
+    assert dia["devuelto"] == pytest.approx(1000) and dia["neto"] == pytest.approx(500)
+    resumen = (await c.get(f"{PREFIJO}/resumen")).json()["dinero"]
+    assert resumen["devuelto"] == pytest.approx(1000) and resumen["neto"] == pytest.approx(500)
+    # anular una devolución la regresa a "por devolver"
+    did = d1.json()["devoluciones"][0]["id"]
+    anul = await c.delete(f"{PREFIJO}/devoluciones/{did}")
+    assert anul.status_code == 200 and anul.json()["por_devolver"] == pytest.approx(1500)
+    assert (await c.delete(f"{PREFIJO}/devoluciones/{did}")).status_code == 409
+    assert (await c.delete(f"{PREFIJO}/devoluciones/99999")).status_code == 404
+    # auditoría
+    acciones = [f["accion"] for f in (await c.get(f"{PREFIJO}/auditoria", params={"reservacion_id": rid})).json()["filas"]]
+    assert "devolucion" in acciones and "cancelar_devolucion" in acciones
+
+
+async def test_devolucion_del_excedente_de_una_reservacion_activa(api):
+    c, _ = api
+    r, _ = await _reservar(c, "Sobrepago", ["adulto"])  # 2000
+    rid = r.json()["id"]
+    await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 2300, "forma_pago": "Efectivo", "fecha": HOY})
+    det = (await c.get(f"{PREFIJO}/reservaciones/{rid}")).json()
+    assert det["excedente"] == pytest.approx(300) and det["por_devolver"] == pytest.approx(300)
+    assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 301, "motivo": "de más"})).status_code == 409
+    ok = await c.post(f"{PREFIJO}/reservaciones/{rid}/devoluciones", json={"importe": 300, "motivo": "cobro duplicado"})
+    assert ok.status_code == 201 and ok.json()["por_devolver"] == 0
+
+
+async def test_confirmacion_al_cliente_queda_en_la_auditoria(api):
+    c, _ = api
+    r, _ = await _reservar(c, "Confirmar", ["adulto"])
+    rid = r.json()["id"]
+    assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/confirmacion", json={"canal": "whatsapp"})).status_code == 200
+    assert (await c.post(f"{PREFIJO}/reservaciones/{rid}/confirmacion", json={"canal": "paloma"})).status_code == 422
+    filas = (await c.get(f"{PREFIJO}/auditoria", params={"reservacion_id": rid})).json()["filas"]
+    conf = [f for f in filas if f["accion"] == "confirmacion"]
+    assert conf and conf[0]["despues"] == {"canal": "whatsapp"} and conf[0]["etiqueta"].startswith("Confirmación")
+
+
+async def test_mensaje_de_confirmacion_se_configura_en_el_evento(api):
+    c, _ = api
+    assert (await c.get(f"{PREFIJO}/evento")).json()["mensaje_confirmacion"] == ""
+    r = await c.put(f"{PREFIJO}/evento", json={"mensaje_confirmacion": "Depósito a la cuenta 1234. Gracias."})
+    assert r.status_code == 200 and r.json()["mensaje_confirmacion"] == "Depósito a la cuenta 1234. Gracias."
+
+
+async def test_historico_de_pagos_de_ninos_2025_por_dia(api):
+    c, _ = api
+    r = await c.get(f"{PREFIJO}/historico/pagos", params={"anio": 2025})
+    assert r.status_code == 200
+    d = r.json()
+    por_fecha = {x["fecha"]: x for x in d["dias"]}
+    assert d["tipos"]["nino"]["boletos"] > 0 and d["tipos"]["nino"]["con_dinero"] is True
+    # adultos 2025: solo la cantidad por día (sin dinero)
+    assert d["tipos"]["adulto"]["boletos"] == 547 and d["tipos"]["adulto"]["con_dinero"] is False and d["tipos"]["adulto"]["cobrado"] == 0
+    assert por_fecha["2025-12-10"]["adulto"]["reservados"] == 123 and por_fecha["2025-12-09"]["adulto"]["reservados"] == 90
+    # 05/11: un anticipo de 272.50; el 10/12 entran las 3 liquidaciones de 817.50 además de los de contado
+    assert por_fecha["2025-11-05"]["nino"]["cobrado"] == 272.50 and por_fecha["2025-11-05"]["nino"]["anticipos"] == 1
+    assert por_fecha["2025-12-10"]["nino"]["liquidaciones"] == 3
+    assert por_fecha["2025-12-10"]["nino"]["cobrado"] == round(por_fecha["2025-12-10"]["nino"]["completos"] * 1090 + 3 * 817.50, 2)
+    # año sin datos: respuesta vacía, no error
+    vacio = (await c.get(f"{PREFIJO}/historico/pagos", params={"anio": 2019})).json()
+    assert vacio["dias"] == [] and vacio["tipos"]["nino"]["disponible"] is False

@@ -302,9 +302,21 @@ function TarjetaReservacion({
         <Text fw={700} size="lg" lineClamp={1}>
           {r.cliente}
         </Text>
-        <Badge color={color} variant="light" size="sm" style={{ flexShrink: 0 }}>
-          {cancelada ? 'Cancelada' : cfg.etiqueta}
-        </Badge>
+        <Group gap={4} wrap="nowrap" style={{ flexShrink: 0 }}>
+          {r.cortesias_por_autorizar > 0 && (
+            <Badge color="yellow" variant="filled" size="sm" title="Un supervisor debe autorizar la cortesía">
+              Cortesía por autorizar
+            </Badge>
+          )}
+          {r.por_devolver > 0 && (
+            <Badge color="orange" variant="filled" size="sm" title="Dinero cobrado que hay que regresar al cliente">
+              Por devolver {dinero(r.por_devolver)}
+            </Badge>
+          )}
+          <Badge color={color} variant="light" size="sm">
+            {cancelada ? 'Cancelada' : cfg.etiqueta}
+          </Badge>
+        </Group>
       </Group>
       <Text size="sm" c="dimmed" mt={2}>
         {etiquetaMesas(r)} · {nSillas} {nSillas === 1 ? 'silla' : 'sillas'}

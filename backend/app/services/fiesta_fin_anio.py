@@ -269,6 +269,16 @@ def estado_silla(tipo: str, estado_reservacion: str | None) -> str:
     return "sin_pago"
 
 
+def calcular_por_devolver(excedente: float, devoluciones: Iterable[dict]) -> dict:
+    """Dinero que se le debe regresar al cliente.
+
+    `excedente` (de `calcular_reservacion`): lo cobrado por encima de lo que debe la reservación; en una reservación
+    CANCELADA es todo lo cobrado (ya no tiene sillas activas). `devoluciones`: dicts con `importe` y `cancelada`.
+    """
+    devuelto = round(sum(float(d.get("importe") or 0.0) for d in devoluciones if not d.get("cancelada", False)), 2)
+    return {"devuelto": devuelto, "por_devolver": round(max(float(excedente) - devuelto, 0.0), 2)}
+
+
 def validar_cantidades(adultos: int, ninos: int, cortesias: int) -> list[str]:
     """Equivale a los avisos `CORREGIR` del Excel (cantidades enteras ≥ 0)."""
     errores = []
@@ -307,7 +317,7 @@ def construir_resumen(
     """KPIs de venta.
 
     `reservaciones`: dicts de reservaciones ACTIVAS con `sillas` (cada una con
-    `tipo`, `precio_aplicado`, `preventa` bool, `activa`) más `importe`,
+    `tipo`, `precio_aplicado`, `preventa` bool, `activa`, y opcional `estado_pago` por silla) más `importe`,
     `pagado`, `saldo`, `estado` (salida de `calcular_reservacion`).
     `historico`: filas de una edición anterior con `fecha`, `reservados`,
     `pagados`, `anticipos`, `sin_anticipo`, `cortesias` (acumulado diario).
@@ -337,9 +347,11 @@ def construir_resumen(
             destino = preventa if s.get("preventa") else normal
             destino[tipo][0] += 1
             destino[tipo][1] += s["precio_aplicado"]
-            if r["estado"] == "pagada":
+            # Estado de ESTA silla (pagada / anticipo / sin pago). Si no viene, se usa el de la reservación.
+            estado = s.get("estado_pago") or r["estado"]
+            if estado in ("pagada", "cortesia"):  # una silla de precio 0 (no cortesía) ya no debe nada
                 pagadas += 1
-            elif r["estado"] == "anticipo":
+            elif estado == "anticipo":
                 anticipos += 1
             else:
                 sin_pago += 1
@@ -434,8 +446,9 @@ def fila_historico_a_fecha(historico: Iterable[dict], fecha_corte: date | None) 
 # ---------------------------------------------------------------------------
 
 
-def construir_cobros(pagos: Iterable[dict], iva_factor: float = 1.16) -> dict:
+def construir_cobros(pagos: Iterable[dict], iva_factor: float = 1.16, devoluciones: Iterable[dict] | None = None) -> dict:
     """Cobros por día con acumulado. `pagos`: dicts `fecha`, `importe`, `forma_pago`.
+    `devoluciones` (opcional): dicts `importe`, `cancelada`; restan del total (`neto`).
 
     `sin_iva` replica Cobros!F (`importe / 1.16`). El desglose completo con
     propina está en `desglose_fiscal`.
@@ -460,10 +473,14 @@ def construir_cobros(pagos: Iterable[dict], iva_factor: float = 1.16) -> dict:
             }
         )
     total = round(sum(por_dia.values()), 2)
+    devuelto = round(sum(float(d["importe"]) for d in (devoluciones or []) if not d.get("cancelada", False)), 2)
+    neto = round(total - devuelto, 2)
     return {
         "dias": filas,
         "total": total,
-        "total_sin_iva": round(total / iva_factor, 2) if iva_factor else total,
+        "devuelto": devuelto,
+        "neto": neto,
+        "total_sin_iva": round(neto / iva_factor, 2) if iva_factor else neto,
         "por_forma_pago": [
             {"forma_pago": k, "importe": round(v, 2)} for k, v in sorted(por_forma.items())
         ],
@@ -508,7 +525,14 @@ def construir_cobros_diarios(
                 ordinal_de_cobro[cobro] = k
             pagos_vigentes.append((r, p, k))
 
-    movimientos = [p["fecha"] for _, p, _ in pagos_vigentes] + [r["fecha_venta"] for r in reservaciones]
+    devoluciones_vigentes = [
+        d for r in reservaciones for d in (r.get("devoluciones") or []) if not d.get("cancelada", False)
+    ]
+    movimientos = (
+        [p["fecha"] for _, p, _ in pagos_vigentes]
+        + [r["fecha_venta"] for r in reservaciones]
+        + [d["fecha"] for d in devoluciones_vigentes]
+    )
     if not movimientos:
         return {"dias": [], "totales": _totales_cobros([]), "hoy": None}
     inicio = min(movimientos)
@@ -517,11 +541,14 @@ def construir_cobros_diarios(
     por_dia: dict[date, dict] = {}
     dia = inicio
     while dia <= fin:
-        por_dia[dia] = {"pago1": 0.0, "pago2": 0.0, "pago3": 0.0, "ventas": 0, "vendidas": {"adulto": 0, "nino": 0, "cortesia": 0}}
+        por_dia[dia] = {"pago1": 0.0, "pago2": 0.0, "pago3": 0.0, "devuelto": 0.0, "ventas": 0, "vendidas": {"adulto": 0, "nino": 0, "cortesia": 0}}
         dia += timedelta(days=1)
     for r, p, k in pagos_vigentes:
         if p["fecha"] in por_dia:
             por_dia[p["fecha"]][f"pago{min(k, 3)}"] += p["importe"]
+    for d in devoluciones_vigentes:
+        if d["fecha"] in por_dia:
+            por_dia[d["fecha"]]["devuelto"] += float(d["importe"])
     for r in reservaciones:
         if r["fecha_venta"] in por_dia:
             por_dia[r["fecha_venta"]]["ventas"] += 1
@@ -530,6 +557,20 @@ def construir_cobros_diarios(
                 for s in r["sillas"]:
                     if s.get("activa") and s.get("tipo") in por_dia[r["fecha_venta"]]["vendidas"]:
                         por_dia[r["fecha_venta"]]["vendidas"][s["tipo"]] += 1
+
+    # Dinero cobrado ese día por tipo de boleto: cada pago ya viene repartido por silla (`repartir_pagos_por_silla`),
+    # así que se suma por el tipo de la silla. Lo que sobra de una silla pagada de más (excedente) no se asigna a nadie.
+    cobrado_por_tipo: dict[date, dict[str, float]] = {d: {"adulto": 0.0, "nino": 0.0, "cortesia": 0.0} for d in por_dia}
+    for r in reservaciones:
+        tipo_de = {s["silla_id"]: s.get("tipo") for s in r["sillas"]}
+        sillas_r = [{**s, "activa": True} for s in r["sillas"] if s.get("activa") or r.get("cancelada")]
+        for sid, fila in repartir_pagos_por_silla(sillas_r, r["pagos"]).items():
+            tipo = tipo_de.get(sid)
+            if tipo not in TIPOS:
+                continue
+            for x in fila["pagos"]:
+                if x["fecha"] in cobrado_por_tipo:
+                    cobrado_por_tipo[x["fecha"]][tipo] += x["importe"]
 
     def reservas_al(d: date) -> dict:
         cuentas = {"pagadas": 0, "anticipos": 0, "sin_anticipo": 0, "cortesias": 0}
@@ -561,8 +602,10 @@ def construir_cobros_diarios(
         x = por_dia[d]
         pago1, pago2, pago3 = (round(x["pago1"], 2), round(x["pago2"], 2), round(x["pago3"], 2))
         total = round(pago1 + pago2 + pago3, 2)
-        acumulado = round(acumulado + total, 2)
-        sin_iva = round(total / iva_factor, 2) if iva_factor else total
+        devuelto = round(x["devuelto"], 2)
+        neto = round(total - devuelto, 2)
+        acumulado = round(acumulado + neto, 2)  # el acumulado es de lo que realmente quedó cobrado (neto de devoluciones)
+        sin_iva = round(neto / iva_factor, 2) if iva_factor else neto
         poliza = polizas.get(d)
         dias.append(
             {
@@ -571,12 +614,15 @@ def construir_cobros_diarios(
                 "pago2": pago2,
                 "pago3": pago3,
                 "total": total,
+                "devuelto": devuelto,
+                "neto": neto,
                 "sin_iva": sin_iva,
                 "poliza": poliza,
                 "diferencia": round(sin_iva - poliza, 2) if poliza is not None else None,
                 "acumulado": acumulado,
-                "movimiento": total != 0 or x["ventas"] > 0,
+                "movimiento": total != 0 or devuelto != 0 or x["ventas"] > 0,
                 "vendidas": x["vendidas"],
+                "cobrado_por_tipo": {t: round(v, 2) for t, v in cobrado_por_tipo[d].items()},
                 "reservas": reservas_al(d),
             }
         )
@@ -593,11 +639,42 @@ def construir_cobros_diarios(
             "fecha": ref,
             "es_hoy": ref == hoy,
             "reservas": snapshot_hoy["reservas"],
-            "cobrado_hoy": snapshot_hoy["total"],
+            "cobrado_hoy": snapshot_hoy["neto"],
             "acumulado": snapshot_hoy["acumulado"],
             "por_cobrar": round(max(importe_activo - pagado_activo, 0.0), 2),
         },
     }
+
+
+def resumir_pagos_historicos(boletos: Iterable[Iterable[tuple[date, float]]]) -> dict:
+    """Día a día de una lista de boletos de una edición anterior (cada boleto = sus pagos `(fecha, importe)`).
+
+    - `reservados`: boletos cuyo PRIMER pago es ese día (el día que se reservó/anticipó).
+    - `cobrado`: dinero que entró ese día (todos los pagos con esa fecha).
+    - `completos` / `anticipos` / `liquidaciones`: boletos pagados de una vez, primeros pagos que fueron anticipo
+      (hay un segundo pago después) y segundos pagos que liquidaron.
+    Devuelve `{"dias": {fecha: {...}}, "boletos": n, "cobrado": total}`; los días sin movimiento no aparecen.
+    """
+    dias: dict[date, dict] = {}
+
+    def dia(f: date) -> dict:
+        return dias.setdefault(f, {"reservados": 0, "cobrado": 0.0, "completos": 0, "anticipos": 0, "liquidaciones": 0})
+
+    n = 0
+    for boleto in boletos:
+        pagos = sorted(boleto, key=lambda p: p[0])
+        if not pagos:
+            continue
+        n += 1
+        primero = dia(pagos[0][0])
+        primero["reservados"] += 1
+        primero["completos" if len(pagos) == 1 else "anticipos"] += 1
+        for k, (fecha, importe) in enumerate(pagos):
+            d = dia(fecha)
+            d["cobrado"] = round(d["cobrado"] + importe, 2)
+            if k > 0:
+                d["liquidaciones"] += 1
+    return {"dias": dias, "boletos": n, "cobrado": round(sum(d["cobrado"] for d in dias.values()), 2)}
 
 
 def _totales_cobros(dias: list[dict]) -> dict:
@@ -607,6 +684,8 @@ def _totales_cobros(dias: list[dict]) -> dict:
         "pago2": round(sum(d["pago2"] for d in dias), 2),
         "pago3": round(sum(d["pago3"] for d in dias), 2),
         "total": round(sum(d["total"] for d in dias), 2),
+        "devuelto": round(sum(d["devuelto"] for d in dias), 2),
+        "neto": round(sum(d["neto"] for d in dias), 2),
         "sin_iva": round(sum(d["sin_iva"] for d in dias), 2),
         "poliza": round(sum(d["poliza"] for d in con_poliza), 2),
         "diferencia": round(sum(d["diferencia"] for d in con_poliza), 2),

@@ -27,14 +27,18 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowsExchange, IconCheck, IconHistory, IconPencil, IconPlus, IconPrinter, IconTrash, IconX } from '@tabler/icons-react';
+import { IconArrowsExchange, IconBrandWhatsapp, IconCheck, IconCopy, IconHistory, IconMail, IconPencil, IconPlus, IconPrinter, IconTrash, IconX } from '@tabler/icons-react';
 import { useEffect, useRef, useState } from 'react';
 
 import {
   mensajeErrorFiesta,
+  registrarConfirmacion,
   useFiestaAgregarPago,
   useFiestaAgregarPagosMultiples,
+  useFiestaCancelarDevolucion,
   useFiestaCancelarPago,
+  useFiestaEvento,
+  useFiestaRegistrarDevolucion,
   useFiestaCancelarReservacion,
   useFiestaEditarPago,
   useFiestaEditarPagoSilla,
@@ -53,6 +57,8 @@ import { imprimirRecibo } from './fiestaImpresion';
 import { useSupervisor } from './SupervisorPin';
 import {
   dinero,
+  enlaceCorreo,
+  enlaceWhatsApp,
   ESTADO_RESERVACION_CONFIG,
   ESTADO_SILLA_CONFIG,
   ETIQUETA_TIPO,
@@ -60,6 +66,7 @@ import {
   guardarCapturista,
   hoyISO,
   leerCapturista,
+  mensajeConfirmacion,
   sugerirAbonos,
   TIPOS_BOLETO,
 } from './fiestaUtils';
@@ -174,13 +181,28 @@ function Contenido({
   const pedirPin = useSupervisor();
 
   const cambiarTipo = async (sillaId: number, tipo: TipoBoletoFiesta) => {
-    // Cambiar adulto ↔ niño ↔ cortesía cambia el precio cobrado: lo autoriza el supervisor.
-    const pin = await pedirPin('cambiar el tipo de boleto (cambia el precio)');
+    // Cambiar adulto ↔ niño cambia el precio cobrado: lo autoriza el supervisor con su contraseña.
+    // Convertir una silla ya vendida en cortesía lleva motivo y lo hace un supervisor (sin contraseña, ya inició sesión).
+    let cortesiaMotivo: string | undefined;
+    if (tipo === 'cortesia') {
+      const m = window.prompt('Motivo de la cortesía (obligatorio, mínimo 3 caracteres):');
+      if (m === null) return;
+      if (m.trim().length < 3) {
+        notifications.show({ color: 'red', message: 'Escribe el motivo de la cortesía.' });
+        return;
+      }
+      cortesiaMotivo = m.trim();
+    }
+    const pin = tipo === 'cortesia' ? '' : await pedirPin('cambiar el tipo de boleto (cambia el precio)');
     if (pin === null) return;
     try {
       await editar.mutateAsync({
         id: reservacion.id,
-        cambios: { sillas_cambiar_tipo: [{ silla_id: sillaId, tipo }], capturado_por: capturadoPor || undefined },
+        cambios: {
+          sillas_cambiar_tipo: [{ silla_id: sillaId, tipo }],
+          cortesia_motivo: cortesiaMotivo,
+          capturado_por: capturadoPor || undefined,
+        },
         pin: pin || undefined,
       });
     } catch (e) {
@@ -290,7 +312,7 @@ function Contenido({
           r.pagos_cancelados > 0
             ? `Las sillas quedaron libres y se cancelaron ${dinero(r.pagos_cancelados)} en pagos.`
             : r.pagado_sin_devolver > 0
-            ? `Las sillas quedaron libres. Hay ${dinero(r.pagado_sin_devolver)} cobrados sin devolver: cancela los pagos cuando se reembolsen.`
+            ? `Las sillas quedaron libres. Hay ${dinero(r.pagado_sin_devolver)} cobrados: registra la devolución en la reservación (sección Devoluciones) cuando se le regrese al cliente.`
             : 'Las sillas quedaron libres.',
       });
       onCerrar();
@@ -311,8 +333,20 @@ function Contenido({
             Vendida el {fechaCorta(reservacion.fecha_venta)}
             {reservacion.capturado_por ? ` · capturó ${reservacion.capturado_por}` : ''}
           </Text>
+          {reservacion.cortesias_por_autorizar > 0 && (
+            <Badge color="yellow" variant="filled" title="Un supervisor debe autorizar estas cortesías; si las rechaza, las sillas se liberan">
+              {reservacion.cortesias_por_autorizar} cortesía(s) por autorizar
+            </Badge>
+          )}
+          {reservacion.cortesia.motivo && (
+            <Badge color="violet" variant="light" title="Motivo y supervisor que autorizó las cortesías">
+              Cortesía: {reservacion.cortesia.motivo}
+              {reservacion.cortesia.autorizada_por ? ` · autorizó ${reservacion.cortesia.autorizada_por}` : ''}
+            </Badge>
+          )}
         </Group>
         <Group gap="xs">
+          {activa && <BotonesConfirmacion reservacion={reservacion} nombreEvento={nombreEvento} />}
           {puede('fiesta_auditoria', 1) && (
             <Button variant="default" leftSection={<IconHistory size={16} />} onClick={() => setVerHistorial(true)}>
               Historial
@@ -448,7 +482,9 @@ function Contenido({
               <Table.Td>
                 {s.estado_pago && (
                   <Badge variant="light" size="sm" color={ESTADO_SILLA_CONFIG[s.estado_pago].mantine}>
-                    {s.estado_pago === 'pagada' ? 'Pagada' : s.estado_pago === 'anticipo' ? 'Anticipo' : s.estado_pago === 'sin_pago' ? 'Sin pago' : 'Cortesía'}
+                    {s.por_autorizar
+                      ? 'Cortesía por autorizar'
+                      : s.estado_pago === 'pagada' ? 'Pagada' : s.estado_pago === 'anticipo' ? 'Anticipo' : s.estado_pago === 'sin_pago' ? 'Sin pago' : 'Cortesía'}
                   </Badge>
                 )}
               </Table.Td>
@@ -675,6 +711,10 @@ function Contenido({
             </Button>
           </Group>
         </Stack>
+      )}
+
+      {(reservacion.por_devolver > 0 || reservacion.devoluciones.length > 0) && (
+        <SeccionDevoluciones reservacion={reservacion} capturadoPor={capturadoPor} onError={avisarError} />
       )}
 
       {activa && (
@@ -1052,6 +1092,8 @@ function CeldaPagoSilla({
   const editarPagoSilla = useFiestaEditarPagoSilla();
   const [abierto, setAbierto] = useState(false);
   const [monto, setMonto] = useState<number | string>('');
+  // Los hooks van SIEMPRE antes de cualquier return condicional (si no, al llegar el primer pago React falla y la pantalla queda en blanco).
+  const [montosParte, setMontosParte] = useState<Record<number, number | string>>({});
   const p = silla.pagos[indice];
   // Si una silla recibió más de 3 porciones, lo que sobra se junta en la 3ª columna ("+N").
   const extra = indice === 2 ? silla.pagos.length - 3 : 0;
@@ -1077,7 +1119,6 @@ function CeldaPagoSilla({
   const partes = p.partes ?? [];
   const variasFormas = partes.length > 1;
   const resumenFormas = variasFormas ? partes.map((x) => `${x.forma_pago || 's/forma'} ${dinero(x.importe)}`).join(' · ') : '';
-  const [montosParte, setMontosParte] = useState<Record<number, number | string>>({});
 
   const guardar = async (importe: number, pagoId: number = p.pago_id) => {
     // Corregir un pago lo puede hacer la cajera; queda registrado con su usuario.
@@ -1367,6 +1408,7 @@ function AgregarSillas({
 }) {
   const editar = useFiestaEditarReservacion();
   const { data } = useFiestaMesas();
+  const [motivoCortesia, setMotivoCortesia] = useState('');
   const [abierto, setAbierto] = useState(false);
   const [mesaNumero, setMesaNumero] = useState<string | null>(null);
   const [elegidas, setElegidas] = useState<Record<number, TipoBoletoFiesta>>({});
@@ -1378,15 +1420,31 @@ function AgregarSillas({
     .filter(([id]) => libres.some((s) => s.id === Number(id)))
     .map(([id, tipo]) => ({ silla_id: Number(id), tipo }));
 
+  const hayCortesia = seleccion.some((s) => s.tipo === 'cortesia');
+
   const agregar = async () => {
     if (seleccion.length === 0) return;
+    if (hayCortesia && motivoCortesia.trim().length < 3) {
+      notifications.show({ color: 'red', message: 'Escribe el motivo de la cortesía.' });
+      return;
+    }
     try {
-      await editar.mutateAsync({
+      // Las cortesías no piden contraseña: se apartan y se avisa a un supervisor.
+      const nueva = await editar.mutateAsync({
         id: reservacion.id,
-        cambios: { sillas_agregar: seleccion, capturado_por: capturadoPor || undefined },
+        cambios: {
+          sillas_agregar: seleccion,
+          cortesia_motivo: hayCortesia ? motivoCortesia.trim() : undefined,
+          capturado_por: capturadoPor || undefined,
+        },
       });
-      notifications.show({ color: 'green', message: `${seleccion.length} silla(s) agregada(s).` });
+      notifications.show(
+        nueva.cortesias_por_autorizar > reservacion.cortesias_por_autorizar
+          ? { color: 'yellow', message: `${seleccion.length} silla(s) agregada(s). Las cortesías quedaron por autorizar: ya se avisó a un supervisor.`, autoClose: 9000 }
+          : { color: 'green', message: `${seleccion.length} silla(s) agregada(s).` },
+      );
       setElegidas({});
+      setMotivoCortesia('');
     } catch (e) {
       onError(e);
     }
@@ -1461,12 +1519,200 @@ function AgregarSillas({
           </Group>
         );
       })}
+      {hayCortesia && (
+        <TextInput
+          size="xs"
+          required
+          label="Motivo de la cortesía"
+          description="Pedirá la autorización de un supervisor"
+          value={motivoCortesia}
+          onChange={(e) => setMotivoCortesia(e.currentTarget.value)}
+        />
+      )}
       {seleccion.length > 0 && (
         <Group justify="flex-end">
           <Button size="xs" onClick={agregar} loading={editar.isPending}>
             Agregar {seleccion.length} {seleccion.length === 1 ? 'silla' : 'sillas'} (al precio de hoy)
           </Button>
         </Group>
+      )}
+    </Stack>
+  );
+}
+
+/** Confirmación al cliente: abre su correo o WhatsApp con el mensaje ya escrito (no se manda nada solo) y deja constancia. */
+function BotonesConfirmacion({ reservacion, nombreEvento }: { reservacion: FiestaReservacion; nombreEvento: string }) {
+  const { data: evento } = useFiestaEvento();
+  const { asunto, cuerpo } = mensajeConfirmacion(reservacion, nombreEvento, evento?.fecha_evento ?? null, evento?.mensaje_confirmacion ?? '');
+  const correo = reservacion.correo.trim();
+  const whatsapp = enlaceWhatsApp(reservacion.telefono_o_cuarto, cuerpo);
+
+  const copiar = async () => {
+    try {
+      await navigator.clipboard.writeText(cuerpo);
+      notifications.show({ color: 'green', message: 'Mensaje copiado. Pégalo donde lo vayas a enviar.' });
+    } catch {
+      window.prompt('Copia el mensaje (Ctrl+C):', cuerpo);
+    }
+    void registrarConfirmacion(reservacion.id, 'copiado');
+  };
+
+  return (
+    <Group gap={6}>
+      <Tooltip label={correo ? `Abre tu correo con el mensaje para ${correo}` : 'La reservación no tiene correo'}>
+        <Button
+          component="a"
+          href={correo ? enlaceCorreo(correo, asunto, cuerpo) : undefined}
+          variant="default"
+          leftSection={<IconMail size={16} />}
+          disabled={!correo}
+          onClick={() => void registrarConfirmacion(reservacion.id, 'correo')}
+        >
+          Correo
+        </Button>
+      </Tooltip>
+      <Tooltip label={whatsapp ? 'Abre WhatsApp con el mensaje ya escrito' : 'Se necesita un teléfono de 10 dígitos'}>
+        <Button
+          component="a"
+          href={whatsapp ?? undefined}
+          target="_blank"
+          rel="noopener noreferrer"
+          variant="default"
+          leftSection={<IconBrandWhatsapp size={16} />}
+          disabled={!whatsapp}
+          onClick={() => void registrarConfirmacion(reservacion.id, 'whatsapp')}
+        >
+          WhatsApp
+        </Button>
+      </Tooltip>
+      <Tooltip label="Copiar el mensaje de confirmación">
+        <ActionIcon variant="default" size="lg" aria-label="Copiar mensaje de confirmación" onClick={copiar}>
+          <IconCopy size={16} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  );
+}
+
+/** Dinero que se le regresó al cliente (reservación cancelada o con excedente). Lo autoriza un supervisor. */
+function SeccionDevoluciones({
+  reservacion,
+  capturadoPor,
+  onError,
+}: {
+  reservacion: FiestaReservacion;
+  capturadoPor: string;
+  onError: (e: unknown) => void;
+}) {
+  const registrar = useFiestaRegistrarDevolucion();
+  const anular = useFiestaCancelarDevolucion();
+  const pedirPin = useSupervisor();
+  const [importe, setImporte] = useState<number | string>(reservacion.por_devolver || '');
+  const [forma, setForma] = useState<string | null>('Efectivo');
+  const [fecha, setFecha] = useState(hoyISO());
+  const [referencia, setReferencia] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const vigentes = reservacion.devoluciones.filter((d) => !d.cancelada);
+
+  const devolver = async () => {
+    const monto = typeof importe === 'number' ? importe : Number(importe);
+    if (!monto || monto <= 0) {
+      notifications.show({ color: 'red', message: 'Captura cuánto se devolvió.' });
+      return;
+    }
+    if (motivo.trim().length < 3) {
+      notifications.show({ color: 'red', message: 'Escribe el motivo de la devolución.' });
+      return;
+    }
+    const pin = await pedirPin('registrar una devolución');
+    if (pin === null) return;
+    try {
+      await registrar.mutateAsync({
+        reservacionId: reservacion.id,
+        importe: monto,
+        fecha,
+        forma_pago: forma ?? undefined,
+        referencia: referencia || undefined,
+        motivo: motivo.trim(),
+        capturado_por: capturadoPor || undefined,
+        pin: pin || undefined,
+      });
+      notifications.show({ color: 'green', message: `Devolución de ${dinero(monto)} registrada.` });
+      setImporte('');
+      setMotivo('');
+      setReferencia('');
+    } catch (e) {
+      onError(e);
+    }
+  };
+
+  const anularDevolucion = async (id: number) => {
+    if (!window.confirm('¿Anular esta devolución? Volverá a quedar como dinero por devolver.')) return;
+    const pin = await pedirPin('anular una devolución');
+    if (pin === null) return;
+    try {
+      await anular.mutateAsync({ devolucionId: id, pin: pin || undefined });
+    } catch (e) {
+      onError(e);
+    }
+  };
+
+  return (
+    <Stack gap="xs" p="sm" style={{ border: '1px solid var(--mantine-color-orange-3)', borderRadius: 8 }}>
+      <Group justify="space-between">
+        <Text fw={600}>Devoluciones</Text>
+        <Group gap="xs">
+          {reservacion.devuelto > 0 && <Badge color="gray">Devuelto {dinero(reservacion.devuelto)}</Badge>}
+          <Badge color={reservacion.por_devolver > 0 ? 'orange' : 'green'} size="lg">
+            {reservacion.por_devolver > 0 ? `Por devolver ${dinero(reservacion.por_devolver)}` : 'Nada por devolver'}
+          </Badge>
+        </Group>
+      </Group>
+      {vigentes.length > 0 && (
+        <Table fz="sm" verticalSpacing={4}>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Fecha</Table.Th>
+              <Table.Th ta="right">Importe</Table.Th>
+              <Table.Th>Forma</Table.Th>
+              <Table.Th>Motivo</Table.Th>
+              <Table.Th>Autorizó</Table.Th>
+              <Table.Th />
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {vigentes.map((d) => (
+              <Table.Tr key={d.id}>
+                <Table.Td>{fechaCorta(d.fecha)}</Table.Td>
+                <Table.Td ta="right">{dinero(d.importe)}</Table.Td>
+                <Table.Td>{d.forma_pago || '—'}</Table.Td>
+                <Table.Td>{d.motivo}</Table.Td>
+                <Table.Td>{d.autorizado_por || '—'}</Table.Td>
+                <Table.Td>
+                  <Button size="compact-xs" variant="subtle" color="red" onClick={() => anularDevolucion(d.id)}>
+                    Anular
+                  </Button>
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      )}
+      {reservacion.por_devolver > 0 && (
+        <>
+          <SimpleGrid cols={{ base: 1, sm: 2, md: 5 }}>
+            <NumberInput label="Importe devuelto" value={importe} onChange={setImporte} min={0} max={reservacion.por_devolver} decimalScale={2} prefix="$" thousandSeparator="," />
+            <TextInput label="Fecha" type="date" value={fecha} onChange={(e) => setFecha(e.currentTarget.value)} />
+            <Select comboboxProps={{ zIndex: 400 }} label="Forma" data={FORMAS_PAGO} value={forma} onChange={setForma} />
+            <TextInput label="Referencia" value={referencia} onChange={(e) => setReferencia(e.currentTarget.value)} />
+            <TextInput label="Motivo" required value={motivo} onChange={(e) => setMotivo(e.currentTarget.value)} />
+          </SimpleGrid>
+          <Group justify="flex-end">
+            <Button color="orange" onClick={devolver} loading={registrar.isPending}>
+              Registrar devolución
+            </Button>
+          </Group>
+        </>
       )}
     </Stack>
   );

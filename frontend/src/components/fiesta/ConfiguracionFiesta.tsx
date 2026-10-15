@@ -3,7 +3,7 @@
  * y capacidad de cada mesa. Los precios nuevos solo afectan ventas futuras.
  */
 
-import { Accordion, Alert, Button, Group, NumberInput, Paper, SimpleGrid, Stack, Table, Text, TextInput, Title } from '@mantine/core';
+import { Accordion, Alert, Button, Group, NumberInput, Paper, SimpleGrid, Stack, Table, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useState } from 'react';
 
@@ -42,6 +42,7 @@ function FormularioEvento({ evento }: { evento: FiestaEvento }) {
   const [corte, setCorte] = useState(evento.corte_preventa ?? '');
   const [iva, setIva] = useState<number | string>(evento.iva_factor);
   const [propina, setPropina] = useState<number | string>(Math.round(evento.propina_pct * 10000) / 100);
+  const [mensaje, setMensaje] = useState(evento.mensaje_confirmacion ?? '');
 
   const guardar = async () => {
     if (!nombre.trim()) {
@@ -64,6 +65,7 @@ function FormularioEvento({ evento }: { evento: FiestaEvento }) {
         corte_preventa: corte || null,
         iva_factor: nuevoIva,
         propina_pct: nuevaPropina,
+        mensaje_confirmacion: mensaje.trim(),
         pin: pin || undefined,
       });
       notifications.show({ color: 'green', message: 'Datos del evento guardados.' });
@@ -90,6 +92,18 @@ function FormularioEvento({ evento }: { evento: FiestaEvento }) {
         <NumberInput label="Factor de IVA" description="1.16 = IVA del 16%" value={iva} onChange={setIva} min={1} decimalScale={4} step={0.01} />
         <NumberInput label="Propina incluida en el precio (%)" value={propina} onChange={setPropina} min={0} decimalScale={2} suffix="%" />
       </SimpleGrid>
+
+      <Textarea
+        mt="md"
+        label="Pie del mensaje de confirmación al cliente"
+        description="Se agrega al final del correo o WhatsApp que se manda desde cada reservación: datos de depósito, políticas, contacto…"
+        placeholder="Ej.: Depósito a la cuenta … a nombre de …. Envía tu comprobante a …"
+        value={mensaje}
+        onChange={(e) => setMensaje(e.currentTarget.value)}
+        minRows={3}
+        maxLength={2000}
+        autosize
+      />
 
       <Group justify="flex-end" mt="md">
         <Button onClick={guardar} loading={actualizar.isPending}>

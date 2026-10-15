@@ -61,3 +61,15 @@ cd frontend && npx tsc -b && npm run build
 bash scripts/qa/levantar_prueba.sh && node scripts/qa/e2e_qa.mjs && node scripts/qa/e2e_pago_ui.mjs   # navegador
 backend\.venv\Scripts\python scripts\respaldar_bd.py                          # respaldo
 ```
+
+## Defecto posterior a la QA (2026-10-14)
+
+| # | Gravedad | Defecto | Corrección |
+|---|---|---|---|
+| D9 | **Alta** | Al registrar el primer pago de una silla la pantalla se quedaba **en blanco**: en `CeldaPagoSilla` (`DetalleReservacion.tsx`) un `useState` quedó **después** de un `return` condicional; al llegar el primer pago cambiaba el número de hooks ("Rendered more hooks than during the previous render") y React desmontaba toda la app. Lo introduje al agregar el desglose por forma de pago. | El hook se movió antes del `return`. Se agregó `components/ErrorBoundary.tsx` (envuelve cada pantalla en `AppLayout`) para que un fallo de dibujo muestre un aviso con "Recargar" en lugar de una pantalla en blanco, y la prueba `scripts/qa/e2e_registrar_pago.mjs` (registrar un pago y un cobro con 2 formas desde el navegador). |
+
+Lección: las pruebas de API no detectan fallos de dibujo del frontend; todo cambio en componentes de pagos debe pasar por `e2e_registrar_pago.mjs`.
+
+## Incidente de disco (2026-10-14)
+
+El disco C: llegó a 100 % y las herramientas dejaron de funcionar. Causa: mis pruebas de navegador dejaban un perfil de Edge de ~100 MB por ejecución (más ~95 procesos Edge sin cerrar que impedían borrarlos): **~11 GB en la carpeta de trabajo** y ~1.6 GB en `scripts/qa`. Corrección: los scripts de `scripts/qa/*.mjs` ahora cierran Edge con todo su árbol de procesos (`taskkill /T /F`), borran su perfil con reintentos y lo crean siempre en `scripts/qa/tmp`. Verificado: tras una ejecución quedan 0 perfiles y 0 procesos. Regla: **no correr pruebas de navegador con menos de ~5 GB libres**; borrar `scripts/qa/tmp` al terminar.

@@ -13,13 +13,13 @@ echo [0/3] Limpiando procesos anteriores...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000 " ^| findstr LISTENING') do taskkill /F /T /PID %%a >nul 2>&1
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5173 " ^| findstr LISTENING') do taskkill /F /T /PID %%a >nul 2>&1
 
-REM Respaldo diario de la base de datos en segundo plano (si Python se cuelga, no detiene el arranque)
+REM Respaldo al arrancar (ademas el vigilante del backend respalda cada 2 horas). Base de datos en segundo plano (si Python se cuelga, no detiene el arranque)
 start "" /min cmd /c ""%~dp0backend\.venv\Scripts\python.exe" "%~dp0scripts\respaldar_bd.py" >> "%~dp0logs\respaldo.log" 2>&1"
 
 set "VIG=powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\vigilante.ps1""
 
 echo [1/3] Levantando el Backend (FastAPI)...
-start "Vigilante - Backend" %VIG% -Nombre backend -Directorio backend -Archivo ".venv\Scripts\python.exe" -Argumentos "-m uvicorn app.main:app --host 127.0.0.1 --port 8000" -Url http://127.0.0.1:8000/health
+start "Vigilante - Backend" %VIG% -Nombre backend -Directorio backend -Archivo ".venv\Scripts\python.exe" -Argumentos "-m uvicorn app.main:app --host 127.0.0.1 --port 8000" -Url http://127.0.0.1:8000/health -RespaldoCadaMin 120
 
 echo [2/3] Levantando el Frontend (React/Vite)...
 start "Vigilante - Frontend" %VIG% -Nombre frontend -Directorio frontend -Archivo "cmd.exe" -Argumentos "/c npm run dev" -Url http://localhost:5173/

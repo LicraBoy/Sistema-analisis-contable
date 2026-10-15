@@ -152,3 +152,82 @@ export function filaDelAnioPasado(
   if (!elegida || objetivo > filas[filas.length - 1].fecha) return null;
   return { fila: elegida, exacta: elegida.fecha === objetivo };
 }
+
+/** Un día antes de una fecha ISO (YYYY-MM-DD), sin pasar por zonas horarias. */
+export function diaAnteriorISO(iso: string): string {
+  const [a, m, d] = iso.split('-').map(Number);
+  const f = new Date(Date.UTC(a, m - 1, d - 1));
+  return `${f.getUTCFullYear()}-${String(f.getUTCMonth() + 1).padStart(2, '0')}-${String(f.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Sillas reservadas / pagadas SOLO en ese día de la edición anterior: acumulado(día) − acumulado(día anterior).
+ * Únicamente si el histórico tiene captura exacta de ambos días (si falta alguno no se inventa nada → null).
+ * El valor puede ser negativo (cancelaciones o cambios ese día).
+ */
+export function variacionDiariaHistorico(
+  filas: FiestaHistoricoFila[],
+  fechaIso: string,
+  anio: number,
+): { reservados: number; pagados: number; cortesias: number } | null {
+  const [, mes, dia] = fechaIso.split('-');
+  const hoy = `${anio}-${mes}-${dia}`;
+  const ayer = diaAnteriorISO(hoy);
+  const fHoy = filas.find((f) => f.fecha === hoy);
+  const fAyer = filas.find((f) => f.fecha === ayer);
+  if (!fHoy || !fAyer) return null;
+  return { reservados: fHoy.reservados - fAyer.reservados, pagados: fHoy.pagados - fAyer.pagados, cortesias: fHoy.cortesias - fAyer.cortesias };
+}
+
+// ── Confirmación al cliente (correo / WhatsApp) ──
+
+const ETIQUETA_TIPO_PLURAL: Record<string, [string, string]> = {
+  adulto: ['adulto', 'adultos'],
+  nino: ['niño', 'niños'],
+  cortesia: ['cortesía', 'cortesías'],
+};
+
+/** Texto de la confirmación: folio, mesa(s), sillas por tipo, total, pagado y saldo, más el pie configurable del evento. */
+export function mensajeConfirmacion(
+  r: { id: number; cliente: string; importe: number; pagado: number; saldo: number; sillas: { mesa: number; tipo: string; activa: boolean }[] },
+  nombreEvento: string,
+  fechaEvento: string | null,
+  pie: string,
+): { asunto: string; cuerpo: string } {
+  const activas = r.sillas.filter((s) => s.activa);
+  const mesas = [...new Set(activas.map((s) => s.mesa))].sort((a, b) => a - b);
+  const porTipo = ['adulto', 'nino', 'cortesia']
+    .map((t) => {
+      const n = activas.filter((s) => s.tipo === t).length;
+      return n > 0 ? `${n} ${ETIQUETA_TIPO_PLURAL[t][n === 1 ? 0 : 1]}` : null;
+    })
+    .filter(Boolean)
+    .join(', ');
+  const lineas = [
+    `Hola ${r.cliente},`,
+    '',
+    `Confirmamos tu reservación #${r.id} para ${nombreEvento}${fechaEvento ? ` (${fechaCorta(fechaEvento)})` : ''}.`,
+    '',
+    `Mesa${mesas.length === 1 ? '' : 's'}: ${mesas.join(', ') || '—'}`,
+    `Lugares: ${activas.length}${porTipo ? ` (${porTipo})` : ''}`,
+    `Total: ${dinero(r.importe)}`,
+    `Pagado: ${dinero(r.pagado)}`,
+    `Saldo pendiente: ${dinero(Math.max(r.saldo, 0))}`,
+  ];
+  if (pie.trim()) lineas.push('', pie.trim());
+  lineas.push('', '¡Gracias por tu preferencia!');
+  return { asunto: `Confirmación de reservación #${r.id} · ${nombreEvento}`, cuerpo: lineas.join('\n') };
+}
+
+/** Enlaces listos para abrir el correo o WhatsApp del que envía (no se manda nada solo). */
+export function enlaceCorreo(correo: string, asunto: string, cuerpo: string): string {
+  return `mailto:${encodeURIComponent(correo)}?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
+}
+
+/** WhatsApp con el teléfono a 10 dígitos (México, +52). Devuelve null si el teléfono no sirve. */
+export function enlaceWhatsApp(telefono: string, cuerpo: string): string | null {
+  const digitos = telefono.replace(/\D/g, '');
+  const diez = digitos.length >= 12 && digitos.startsWith('52') ? digitos.slice(-10) : digitos;
+  if (diez.length !== 10) return null;
+  return `https://wa.me/52${diez}?text=${encodeURIComponent(cuerpo)}`;
+}

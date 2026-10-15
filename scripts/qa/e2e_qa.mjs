@@ -1,5 +1,5 @@
 // E2E de QA por CDP (Edge headless) contra el entorno de pruebas aislado: front 5180 → backend 8011 (copia de la BD).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,13 +9,16 @@ const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const BASE = 'http://127.0.0.1:5180';
 const PASS = 'Prueba-QA-2026';
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+// Cierra Edge con TODOS sus procesos hijos y borra su perfil (si no, quedan ~100 MB por ejecución y se llena el disco).
+const matarEdge = (e) => { try { spawnSync('taskkill', ['/PID', String(e.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {} };
+const borrarPerfil = async (dir) => { await esperar(800); try { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 400 }); } catch {} };
 
 let totalFallas = 0;
 const ok = (n, c, x = '') => { if (!c) totalFallas++; console.log(`${c ? 'OK   ' : 'FALLA'} ${n} ${x}`); };
 
 async function sesion(nombre, fn) {
   const puerto = 9500 + Math.floor(Math.random() * 300);
-  const perfil = join(aqui, `edge_qa_${puerto}`);
+  const perfil = join(aqui, `tmp/edge_qa_${puerto}`);
   mkdirSync(perfil, { recursive: true });
   const edge = spawn(EDGE, ['--headless=new', '--disable-gpu', `--remote-debugging-port=${puerto}`, `--user-data-dir=${perfil}`, 'about:blank'], { stdio: 'ignore' });
   let ws;
@@ -63,7 +66,7 @@ async function sesion(nombre, fn) {
     const sh = await cdp('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(aqui, `qa_${nombre.replace(/\W+/g, '_')}.png`), Buffer.from(sh.data, 'base64'));
   } catch (e) { ok(`${nombre}: sin excepciones del script`, false, e.message); }
-  finally { try { ws.close(); } catch {} edge.kill(); await esperar(700); try { rmSync(perfil, { recursive: true, force: true }); } catch {} }
+  finally { try { ws.close(); } catch {} matarEdge(edge); await esperar(700); await borrarPerfil(perfil); }
 }
 
 await sesion('Sin sesion', async (t) => {
@@ -78,7 +81,7 @@ await sesion('Sin sesion', async (t) => {
 await sesion('Cajera de Fiesta', async (t) => {
   await t.login('qa_cajera_fiesta');
   await t.ir('/fiesta-fin-anio');
-  ok('cajera: entra a Fiesta', await t.esperarTexto('Fiesta de Fin de Año'));
+  ok('cajera: entra a Fiesta', await t.esperarTexto('Fiesta de Fin de Año') && await t.esperarTexto('Reservaciones'));
   const txt = await t.texto();
   ok('cajera: ve las pestañas operativas', ['Croquis', 'Reservaciones', 'Cobros', 'Resumen'].every((x) => txt.includes(x)));
   ok('cajera: NO ve la pestaña Auditoría', !txt.includes('Auditoría'));

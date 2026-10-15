@@ -24,6 +24,8 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 BACKEND = RAIZ / "backend"
 CARPETA = RAIZ / "backups"
+DIAS_HISTORIAL = 14
+EXCLUIDAS_DE_ARCHIVOS = "amarre_costo_archivos"  # los reportes de Amarre se pueden volver a subir; no se respaldan
 
 
 def ruta_bd() -> Path:
@@ -55,10 +57,72 @@ def respaldar(conservar: int) -> Path:
         destino.unlink(missing_ok=True)
         sys.exit(f"El respaldo salió dañado ({resultado}); se descartó.")
     antiguos = sorted(CARPETA.glob(f"{origen.stem}_*{origen.suffix}"))
-    for viejo in antiguos[:-conservar] if conservar > 0 else []:
-        viejo.unlink(missing_ok=True)
-    print(f"Respaldo creado: {destino} ({destino.stat().st_size / 1_048_576:.1f} MB). Se conservan {min(len(antiguos), conservar)}.")
+    quedan = antiguos
+    if conservar > 0:
+        # Se conservan los `conservar` más recientes y, además, el último de cada uno de los últimos `DIAS_HISTORIAL` días
+        # (con respaldos cada pocas horas, solo "los últimos N" cubriría apenas un día).
+        mantener = set(antiguos[-conservar:])
+        por_dia: dict[str, Path] = {}
+        for f in antiguos:
+            m = re.search(r"_(\d{4}-\d{2}-\d{2})_\d{4}", f.name)
+            if m:
+                por_dia[m.group(1)] = f
+        mantener.update(f for _, f in sorted(por_dia.items())[-DIAS_HISTORIAL:])
+        quedan = [f for f in antiguos if f in mantener]
+        for viejo in antiguos:
+            if viejo not in mantener:
+                viejo.unlink(missing_ok=True)
+    print(f"Respaldo creado: {destino} ({destino.stat().st_size / 1_048_576:.1f} MB). Se conservan {len(quedan)}.")
+    copiar_archivos_subidos()
+    copiar_a_destinos_extra(destino)
     return destino
+
+
+def copiar_archivos_subidos() -> None:
+    """Espejo incremental de `backend/storage` (facturas adjuntas; sin los archivos de Amarre de Costo) en `backups/archivos/`."""
+    origen = BACKEND / "storage"
+    if not origen.exists():
+        return
+    copiados = _espejo(origen, CARPETA / "archivos")
+    print(f"Archivos subidos: {copiados} nuevo(s) o modificado(s) copiados.")
+
+
+def _espejo(origen: Path, destino: Path) -> int:
+    copiados = 0
+    for f in origen.rglob("*"):
+        if not f.is_file() or EXCLUIDAS_DE_ARCHIVOS in f.relative_to(origen).parts:
+            continue
+        d = destino / f.relative_to(origen)
+        if d.exists() and d.stat().st_size == f.stat().st_size and d.stat().st_mtime >= f.stat().st_mtime:
+            continue
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, d)
+        copiados += 1
+    return copiados
+
+
+def copiar_a_destinos_extra(respaldo: Path) -> None:
+    """Copia el respaldo (y los archivos subidos) a las carpetas listadas en `backups/destinos_extra.txt`
+    (una ruta por línea: disco USB, carpeta de red…). Si un destino no está disponible solo se avisa: el respaldo local ya existe."""
+    lista = CARPETA / "destinos_extra.txt"
+    if not lista.exists():
+        return
+    for linea in lista.read_text(encoding="utf-8").splitlines():
+        linea = linea.strip()
+        if not linea or linea.startswith("#"):
+            continue
+        try:
+            raiz = Path(linea)
+            raiz.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(respaldo, raiz / respaldo.name)
+            if (CARPETA / "archivos").exists():
+                _espejo(CARPETA / "archivos", raiz / "archivos")
+            viejos = sorted(raiz.glob(f"{respaldo.stem.rsplit('_', 2)[0]}_*{respaldo.suffix}"))
+            for v in viejos[:-30]:
+                v.unlink(missing_ok=True)
+            print(f"Copia extra en {raiz}")
+        except OSError as e:
+            print(f"AVISO: no se pudo copiar a {linea}: {e}")
 
 
 def restaurar(archivo: Path) -> None:
@@ -78,7 +142,7 @@ def restaurar(archivo: Path) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--conservar", type=int, default=14, help="cuántos respaldos guardar (0 = todos)")
+    p.add_argument("--conservar", type=int, default=12, help="cuántos respaldos recientes guardar, además del último de cada día de las 2 últimas semanas (0 = todos)")
     p.add_argument("--restaurar", type=Path, help="restaura desde este archivo (apaga los servidores antes)")
     a = p.parse_args()
     restaurar(a.restaurar) if a.restaurar else respaldar(a.conservar)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Entorno de PRUEBAS aislado: copia de la BD real, backend en 8011 con login activo, Vite en 5180.
-ESC="$(cd "$(dirname "$0")" && pwd)/tmp"; mkdir -p "$ESC"
+ESC="$(cd "$(dirname "$0")" && pwd -W)/tmp"; mkdir -p "$ESC"
 cd "$(dirname "$0")/../.."
 cp backups/local_db_*.sqlite3 "$ESC/bd_e2e.sqlite3" 2>/dev/null || cp backend/local_db.sqlite3 "$ESC/bd_e2e.sqlite3"
 cd backend
@@ -28,6 +28,7 @@ async def main():
 asyncio.run(main())
 print("usuarios QA listos")
 EOF
+timeout 180 .venv/Scripts/python.exe -m alembic upgrade head > "$ESC/e2e_alembic.log" 2>&1  # la copia puede venir de una migración anterior
 timeout 120 .venv/Scripts/python.exe "$ESC/sembrar_e2e.py"
 nohup .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8011 > "$ESC/e2e_backend.log" 2>&1 &
 cd ../frontend

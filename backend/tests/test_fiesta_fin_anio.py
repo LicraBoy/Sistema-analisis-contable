@@ -22,6 +22,7 @@ from app.services.fiesta_fin_anio import (
     precio_aplicable,
     distribuir_abono,
     repartir_pagos_por_silla,
+    resumir_pagos_historicos,
     sugerir_abonos,
     validar_cantidades,
 )
@@ -538,3 +539,48 @@ def test_cobros_diarios_muestra_el_tipo_de_boleto_vendido_cada_dia():
     assert dia2["vendidas"] == {"adulto": 1, "nino": 1, "cortesia": 1}
     assert dia3["vendidas"] == {"adulto": 2, "nino": 0, "cortesia": 0}  # la cancelada no cuenta
     assert dia3["reservas"]["tipos"] == {"adulto": 3, "nino": 1, "cortesia": 1}  # acumulado al día
+
+
+def test_resumen_usa_el_estado_de_cada_silla_cuando_viene():
+    sillas = [{"tipo": "adulto", "precio_aplicado": 2000, "preventa": True, "activa": True, "estado_pago": e} for e in ("pagada", "anticipo", "sin_pago")]
+    res = construir_resumen([{"sillas": sillas, "importe": 6000, "pagado": 2500, "saldo": 3500, "estado": "anticipo"}], 100)
+    assert (res["estado"]["pagadas"], res["estado"]["anticipos"], res["estado"]["sin_anticipo"]) == (1, 1, 1)
+
+
+def test_resumen_sin_estado_por_silla_usa_el_de_la_reservacion():
+    sillas = [{"tipo": "adulto", "precio_aplicado": 2000, "preventa": True, "activa": True} for _ in range(2)]
+    res = construir_resumen([{"sillas": sillas, "importe": 4000, "pagado": 4000, "saldo": 0, "estado": "pagada"}], 100)
+    assert res["estado"]["pagadas"] == 2
+
+
+# --- Pagos por boleto de una edición anterior ---------------------------------
+
+
+def test_resumir_pagos_historicos_anticipo_mas_liquidacion_es_un_boleto():
+    boletos = [
+        [(date(2025, 11, 5), 272.50), (date(2025, 12, 10), 817.50)],  # anticipo y liquidación
+        [(date(2025, 12, 10), 1090.0)],  # pagado de contado
+        [(date(2025, 12, 10), 1090.0)],
+    ]
+    out = resumir_pagos_historicos(boletos)
+    assert out["boletos"] == 3 and out["cobrado"] == 272.50 + 817.50 + 2180
+    nov5, dic10 = out["dias"][date(2025, 11, 5)], out["dias"][date(2025, 12, 10)]
+    assert (nov5["reservados"], nov5["anticipos"], nov5["cobrado"]) == (1, 1, 272.50)
+    # el 10/12 se reservaron 2 (los de contado); la liquidación es dinero, no una reserva nueva
+    assert (dic10["reservados"], dic10["completos"], dic10["liquidaciones"], dic10["cobrado"]) == (2, 2, 1, 2997.50)
+
+
+def test_resumir_pagos_historicos_lista_vacia():
+    assert resumir_pagos_historicos([]) == {"dias": {}, "boletos": 0, "cobrado": 0.0}
+
+
+def test_cobrado_por_tipo_reparte_cada_pago_entre_adulto_y_nino():
+    r = _res(_d(2), [2000, 1000], [(_d(2), 1500, False), (_d(3), 1500, False)])
+    r["sillas"][0]["tipo"], r["sillas"][1]["tipo"] = "adulto", "nino"
+    out = construir_cobros_diarios([r], {}, 1.16, _d(3), _d(3))
+    d2, d3 = out["dias"]
+    # 1500 el día 2 se reparte proporcional al saldo (2000/1000) y el día 3 completa lo que falta
+    assert d2["cobrado_por_tipo"]["adulto"] + d2["cobrado_por_tipo"]["nino"] == pytest.approx(1500)
+    assert d2["cobrado_por_tipo"]["adulto"] == pytest.approx(1000) and d2["cobrado_por_tipo"]["nino"] == pytest.approx(500)
+    assert d3["cobrado_por_tipo"]["adulto"] == pytest.approx(1000) and d3["cobrado_por_tipo"]["nino"] == pytest.approx(500)
+    assert d2["cobrado_por_tipo"]["cortesia"] == 0

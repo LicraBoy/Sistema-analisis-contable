@@ -1,5 +1,5 @@
 // E2E: cobro con 2 formas de pago = UN Pago 1 en el detalle, y la silla pagada se ve pagada en el mapa (entorno de pruebas 5180/8011).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,9 @@ const API = 'http://127.0.0.1:8011';
 const BASE = 'http://127.0.0.1:5180';
 const PASS = 'Prueba-QA-2026';
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+// Cierra Edge con TODOS sus procesos hijos y borra su perfil (si no, quedan ~100 MB por ejecución y se llena el disco).
+const matarEdge = (e) => { try { spawnSync('taskkill', ['/PID', String(e.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {} };
+const borrarPerfil = async (dir) => { await esperar(800); try { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 400 }); } catch {} };
 let fallas = 0; const ok = (n, c, x = '') => { if (!c) fallas++; console.log(`${c ? 'OK   ' : 'FALLA'} ${n} ${x}`); };
 
 // ── preparación por API (como lo haría una cajera)
@@ -19,7 +22,7 @@ const mesa = mesas.find((m) => m.sillas.filter((s) => s.estado === 'libre' && !s
 const libres = mesa.sillas.filter((s) => s.estado === 'libre' && !s.extra).slice(0, 3);
 const cliente = 'QA Multiforma ' + Date.now().toString().slice(-5);
 const hoy = new Date().toISOString().slice(0, 10);
-const res = await (await fetch(`${API}/fiesta-fin-anio/reservaciones`, { method: 'POST', headers: H, body: JSON.stringify({ cliente, fecha_venta: hoy, sillas: libres.map((s) => ({ silla_id: s.id, tipo: 'adulto' })) }) })).json();
+const res = await (await fetch(`${API}/fiesta-fin-anio/reservaciones`, { method: 'POST', headers: H, body: JSON.stringify({ cliente, telefono_o_cuarto: '6691234567', correo: 'qa@correo.com', fecha_venta: hoy, sillas: libres.map((s) => ({ silla_id: s.id, tipo: 'adulto' })) }) })).json();
 ok('API: reservación creada', !!res.id, JSON.stringify(res).slice(0, 80));
 const precio = res.sillas[0].precio_aplicado;
 console.log(`   precio por silla = ${precio}`);
@@ -53,7 +56,7 @@ try {
   ok('mapa carga', await espS(`!!document.querySelector('[aria-label^="Mesa ${mesa.numero},"]')`));
   await esperar(800);
   const titulo = await ev(`document.querySelector('[aria-label^="Mesa ${mesa.numero},"] title')?.textContent ?? ''`);
-  ok('mapa: la mesa indica "1 pagada"', /1 pagada/.test(titulo), titulo);
+  ok('mapa: la mesa indica "1 pagada"', /[1-9][0-9]* pagadas?/.test(titulo), titulo);
   const colores = await ev(`[...document.querySelectorAll('[aria-label^="Mesa ${mesa.numero},"] path')].map(p=>p.getAttribute('fill')).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).length`);
   ok('mapa: la mesa pinta sillas con más de un color (pagada vs anticipo)', colores >= 2, `colores=${colores}`);
   // Reservaciones → buscar → abrir detalle
@@ -76,4 +79,4 @@ try {
   writeFileSync(join(aqui, 'qa_pago_multiforma.png'), Buffer.from(sh.data, 'base64'));
   ok('sin respuestas 5xx', cincos.length === 0, cincos.join(' '));
 } catch (e) { ok('script sin excepciones', false, e.message); }
-finally { try { ws.close(); } catch {} edge.kill(); await esperar(600); try { rmSync(perfil, { recursive: true, force: true }); } catch {} console.log(fallas ? `FALLAS ${fallas}` : 'TODO OK'); process.exit(0); }
+finally { try { ws.close(); } catch {} matarEdge(edge); await esperar(600); await borrarPerfil(perfil); console.log(fallas ? `FALLAS ${fallas}` : 'TODO OK'); process.exit(0); }

@@ -29,6 +29,8 @@ export interface FiestaEvento {
   iva_factor: number;
   propina_pct: number;
   total_contabilidad_al_dia: number | null;
+  /** Pie de la confirmación que se manda al cliente (depósito, políticas, contacto). */
+  mensaje_confirmacion: string;
   precios: FiestaPrecio[];
 }
 
@@ -103,11 +105,32 @@ export interface FiestaReservacionSilla {
   precio_aplicado: number;
   preventa: boolean;
   activa: boolean;
+  /** Cortesía apartada que todavía no autoriza un supervisor. */
+  por_autorizar: boolean;
   /** Reflejo por silla, como Pago 1/2/3, Pagado y Saldo de la hoja de mesa del Excel. */
   pagado: number;
   saldo: number;
   estado_pago: EstadoPagoSillaFiesta | null;
   pagos: FiestaPagoSilla[];
+}
+
+export interface FiestaSolicitudCortesia {
+  id: number;
+  reservacion_id: number;
+  silla_ids: number[];
+  motivo: string;
+  estado: 'pendiente' | 'aprobada' | 'rechazada';
+  solicitado_por: string;
+  resuelto_por: string;
+  resuelto_en: string | null;
+  nota_resolucion: string;
+  creado_en: string;
+}
+
+export interface FiestaSolicitudCortesiaDetalle extends FiestaSolicitudCortesia {
+  cliente: string;
+  sillas: { mesa: number; silla: number }[];
+  reservacion_estatus: 'activa' | 'cancelada';
 }
 
 export interface FiestaPagoItem {
@@ -128,6 +151,18 @@ export interface FiestaPreventaAutorizada {
   motivo: string;
 }
 
+export interface FiestaDevolucion {
+  id: number;
+  importe: number;
+  fecha: string;
+  forma_pago: string;
+  referencia: string;
+  motivo: string;
+  capturado_por: string;
+  autorizado_por: string;
+  cancelada: boolean;
+}
+
 export interface FiestaReservacion {
   id: number;
   cliente: string;
@@ -145,6 +180,15 @@ export interface FiestaReservacion {
   saldo: number;
   excedente: number;
   estado: EstadoReservacionFiesta;
+  /** Motivo y supervisor de las cortesías de esta reservación. */
+  cortesia: { motivo: string; autorizada_por: string };
+  /** Sillas de cortesía apartadas que esperan la autorización de un supervisor. */
+  cortesias_por_autorizar: number;
+  solicitudes_cortesia: FiestaSolicitudCortesia[];
+  /** Dinero ya devuelto al cliente y lo que aún se le debe regresar (reservación cancelada o con excedente). */
+  devuelto: number;
+  por_devolver: number;
+  devoluciones: FiestaDevolucion[];
   sillas: FiestaReservacionSilla[];
   pagos: FiestaPagoItem[];
 }
@@ -208,6 +252,9 @@ export interface FiestaCobroDia {
   pago2: number;
   pago3: number;
   total: number;
+  /** Devoluciones de ese día y lo cobrado neto. */
+  devuelto: number;
+  neto: number;
   sin_iva: number;
   /** Total que contabilidad registró en póliza ese día (null = sin capturar). */
   poliza: number | null;
@@ -217,12 +264,31 @@ export interface FiestaCobroDia {
   movimiento: boolean;
   /** Boletos vendidos ese día por tipo (adulto / niño / cortesía). */
   vendidas: { adulto: number; nino: number; cortesia: number };
+  /** Dinero cobrado ese día repartido por tipo de boleto (cada pago ya viene repartido por silla). */
+  cobrado_por_tipo: { adulto: number; nino: number; cortesia: number };
   reservas: FiestaReservasDia;
+}
+
+/** Un día de los boletos de una edición anterior: cuántos se reservaron y cuánto dinero entró. */
+export interface FiestaHistoricoPagosDia {
+  reservados: number;
+  cobrado: number;
+  completos: number;
+  anticipos: number;
+  liquidaciones: number;
+}
+
+export interface FiestaHistoricoPagos {
+  anio: number;
+  tipos: Record<'nino' | 'adulto', { boletos: number; cobrado: number; disponible: boolean; con_dinero: boolean }>;
+  dias: ({ fecha: string } & Partial<Record<'nino' | 'adulto', FiestaHistoricoPagosDia>>)[];
+  ninos_esperados: number | null;
+  ninos_cuadran: boolean;
 }
 
 export interface FiestaCobros {
   dias: FiestaCobroDia[];
-  totales: { pago1: number; pago2: number; pago3: number; total: number; sin_iva: number; poliza: number; diferencia: number; dias_con_poliza: number };
+  totales: { pago1: number; pago2: number; pago3: number; total: number; devuelto: number; neto: number; sin_iva: number; poliza: number; diferencia: number; dias_con_poliza: number };
   hoy: {
     fecha: string;
     es_hoy: boolean;
@@ -232,6 +298,9 @@ export interface FiestaCobros {
     por_cobrar: number;
   } | null;
   total: number;
+  /** Devoluciones al cliente y lo que realmente quedó cobrado (total − devuelto). */
+  devuelto: number;
+  neto: number;
   total_sin_iva: number;
   por_forma_pago: { forma_pago: string; importe: number }[];
   fiscal: { subtotal: number; iva: number; propina: number; total: number };
@@ -253,10 +322,13 @@ export interface FiestaPagoNuevo {
 }
 
 export interface FiestaReservacionNueva {
+  /** Nombre, teléfono y correo son obligatorios para reservar. */
   cliente: string;
-  telefono_o_cuarto?: string;
-  correo?: string;
+  telefono_o_cuarto: string;
+  correo: string;
   preventa_autorizada?: { por: string; motivo: string };
+  /** Obligatorio si alguna silla es cortesía (además de la autorización de supervisor). */
+  cortesia_motivo?: string;
   notas?: string;
   fecha_venta?: string;
   capturado_por?: string;
@@ -270,6 +342,8 @@ export interface FiestaReservacionCambios {
   correo?: string;
   preventa_autorizada?: { por: string; motivo: string };
   quitar_preventa?: boolean;
+  /** Obligatorio al agregar o cambiar sillas a cortesía (además de la autorización de supervisor). */
+  cortesia_motivo?: string;
   notas?: string;
   sillas_agregar?: FiestaSillaNueva[];
   sillas_quitar?: number[];
@@ -297,6 +371,7 @@ export interface FiestaEventoCambios {
   propina_pct?: number;
   total_contabilidad_al_dia?: number | null;
   limpiar_contabilidad?: boolean;
+  mensaje_confirmacion?: string;
 }
 
 export interface FiestaFiltrosReservaciones {
@@ -363,7 +438,7 @@ export function useFiestaMesas(enabled = true) {
       return response.data;
     },
     enabled,
-    refetchInterval: 15_000, // varias cajas capturando: que todas vean lo mismo
+    refetchInterval: 5_000, // varias cajas capturando: que todas vean lo mismo
   });
 }
 
@@ -375,7 +450,7 @@ export function useFiestaReservaciones(filtros: FiestaFiltrosReservaciones = {},
       return response.data;
     },
     enabled,
-    refetchInterval: 30_000,
+    refetchInterval: 8_000,
   });
 }
 
@@ -387,6 +462,7 @@ export function useFiestaReservacion(id: number | null) {
       return response.data;
     },
     enabled: id !== null,
+    refetchInterval: 8_000, // si otra caja registra un abono, el detalle abierto se actualiza solo
   });
 }
 
@@ -400,7 +476,7 @@ export function useFiestaResumen(fechaCorte?: string, enabled = true) {
       return response.data;
     },
     enabled,
-    refetchInterval: 15_000, // otras cajas capturando: Resumen y Cobros se mantienen al día
+    refetchInterval: 10_000, // otras cajas capturando: Resumen y Cobros se mantienen al día
     refetchOnWindowFocus: true,
   });
 }
@@ -448,6 +524,18 @@ export function useFiestaGuardarCierreHistorico() {
   });
 }
 
+/** Boletos de la edición anterior con la fecha y monto de cada pago (niños; adultos cuando se carguen). */
+export function useFiestaHistoricoPagos(anio?: number) {
+  return useQuery({
+    queryKey: ['fiesta', 'historico-pagos', anio ?? null],
+    queryFn: async (): Promise<FiestaHistoricoPagos> => {
+      const response = await apiClient.get('/fiesta-fin-anio/historico/pagos', { params: anio ? { anio } : {} });
+      return response.data;
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
 /** Carga el histórico de la edición anterior tomado del Excel (idempotente). */
 export function useFiestaSembrarHistorico() {
   const invalidar = useInvalidarFiesta();
@@ -468,7 +556,7 @@ export function useFiestaCobros(enabled = true) {
       return response.data;
     },
     enabled,
-    refetchInterval: 15_000,
+    refetchInterval: 10_000,
     refetchOnWindowFocus: true,
   });
 }
@@ -510,6 +598,33 @@ export function useFiestaCancelarReservacion() {
       const response = await apiClient.delete(`/fiesta-fin-anio/reservaciones/${params.id}`, {
         params: { motivo: params.motivo, usuario: params.usuario, cancelar_pagos: params.cancelar_pagos },
       });
+      return response.data;
+    },
+    onSettled: invalidar,
+  });
+}
+
+/** Campana del supervisor: cortesías apartadas por las cajeras que esperan autorización (solo con la capacidad de supervisor). */
+export function useFiestaSolicitudesCortesia(habilitado: boolean) {
+  return useQuery({
+    queryKey: ['fiesta', 'solicitudes-cortesia'],
+    queryFn: async (): Promise<{ solicitudes: FiestaSolicitudCortesiaDetalle[]; total: number }> => {
+      const response = await apiClient.get('/fiesta-fin-anio/solicitudes-cortesia');
+      return response.data;
+    },
+    enabled: habilitado,
+    refetchInterval: 8_000, // el aviso debe llegar rápido, sin que el supervisor recargue
+  });
+}
+
+export function useFiestaResolverCortesia() {
+  const invalidar = useInvalidarFiesta();
+  return useMutation({
+    mutationFn: async (params: { id: number; aprobar: boolean; nota?: string }): Promise<FiestaReservacion> => {
+      const response = await apiClient.post(
+        `/fiesta-fin-anio/solicitudes-cortesia/${params.id}/${params.aprobar ? 'aprobar' : 'rechazar'}`,
+        { nota: params.nota },
+      );
       return response.data;
     },
     onSettled: invalidar,
@@ -770,4 +885,47 @@ export async function descargarAuditoriaExcel(filtros: FiestaAuditoriaFiltros): 
   a.download = 'auditoria_fiesta.xlsx';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+
+// ── Devoluciones y confirmación al cliente ──
+
+export interface FiestaDevolucionNueva {
+  importe: number;
+  fecha?: string;
+  forma_pago?: string;
+  referencia?: string;
+  motivo: string;
+  capturado_por?: string;
+}
+
+export function useFiestaRegistrarDevolucion() {
+  const invalidar = useInvalidarFiesta();
+  return useMutation({
+    mutationFn: async ({ reservacionId, pin, ...datos }: FiestaDevolucionNueva & { reservacionId: number; pin?: string }): Promise<FiestaReservacion> => {
+      const response = await apiClient.post(`/fiesta-fin-anio/reservaciones/${reservacionId}/devoluciones`, datos, { headers: cabeceraPin(pin) });
+      return response.data;
+    },
+    onSettled: invalidar,
+  });
+}
+
+export function useFiestaCancelarDevolucion() {
+  const invalidar = useInvalidarFiesta();
+  return useMutation({
+    mutationFn: async (params: { devolucionId: number; pin?: string }): Promise<FiestaReservacion> => {
+      const response = await apiClient.delete(`/fiesta-fin-anio/devoluciones/${params.devolucionId}`, { headers: cabeceraPin(params.pin) });
+      return response.data;
+    },
+    onSettled: invalidar,
+  });
+}
+
+/** Deja constancia (usuario y hora) de que se mandó la confirmación al cliente. No bloquea el envío si falla. */
+export async function registrarConfirmacion(reservacionId: number, canal: 'correo' | 'whatsapp' | 'copiado'): Promise<void> {
+  try {
+    await apiClient.post(`/fiesta-fin-anio/reservaciones/${reservacionId}/confirmacion`, { canal });
+  } catch {
+    // la auditoría no debe impedir que la cajera mande el mensaje
+  }
 }

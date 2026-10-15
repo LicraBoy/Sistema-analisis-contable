@@ -48,6 +48,8 @@ class FiestaEvento(Base):
     total_contabilidad_al_dia: Mapped[float | None] = mapped_column(Float, nullable=True)
     # PIN del supervisor (salt$hash, PBKDF2). NULL = aún sin configurar: las acciones sensibles quedan abiertas.
     pin_supervisor_hash: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    # Texto al pie de la confirmación que se manda al cliente (datos de depósito, políticas, contacto).
+    mensaje_confirmacion: Mapped[str | None] = mapped_column(Text, nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_ahora)
 
@@ -114,6 +116,9 @@ class FiestaReservacion(Base):
     preventa_autorizada: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     preventa_autorizada_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
     preventa_motivo: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Las cortesías las autoriza un supervisor y siempre llevan motivo.
+    cortesia_motivo: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cortesia_autorizada_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
     fecha_venta: Mapped[date] = mapped_column(Date, nullable=False)
     capturado_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
     estatus: Mapped[str] = mapped_column(String(10), nullable=False, default="activa")  # "activa" | "cancelada"
@@ -126,6 +131,12 @@ class FiestaReservacion(Base):
     )
     pagos: Mapped[list["FiestaPago"]] = relationship(
         back_populates="reservacion", cascade="all, delete-orphan", order_by="FiestaPago.fecha"
+    )
+    devoluciones: Mapped[list["FiestaDevolucion"]] = relationship(
+        back_populates="reservacion", cascade="all, delete-orphan", order_by="FiestaDevolucion.fecha"
+    )
+    solicitudes_cortesia: Mapped[list["FiestaSolicitudCortesia"]] = relationship(
+        back_populates="reservacion", cascade="all, delete-orphan", order_by="FiestaSolicitudCortesia.id"
     )
 
 
@@ -175,6 +186,49 @@ class FiestaPago(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_ahora)
 
     reservacion: Mapped[FiestaReservacion] = relationship(back_populates="pagos")
+
+
+class FiestaSolicitudCortesia(Base):
+    """Aviso a un supervisor/administrador: una cajera apartó sillas de cortesía y falta que se autoricen.
+
+    Mientras está `pendiente` las sillas quedan apartadas sin cobro; al aprobar quedan como cortesía; al rechazar se
+    liberan (y si la reservación se queda sin sillas, se cancela). Un supervisor que da la cortesía la autoriza solo.
+    """
+
+    __tablename__ = "fiesta_solicitud_cortesia"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reservacion_id: Mapped[int] = mapped_column(ForeignKey("fiesta_reservacion.id"), nullable=False, index=True)
+    silla_ids: Mapped[str] = mapped_column(String(200), nullable=False)  # ids separados por coma
+    motivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    estado: Mapped[str] = mapped_column(String(10), nullable=False, default="pendiente", index=True)  # pendiente|aprobada|rechazada
+    solicitado_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    resuelto_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    resuelto_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    nota_resolucion: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_ahora)
+
+    reservacion: Mapped[FiestaReservacion] = relationship(back_populates="solicitudes_cortesia")
+
+
+class FiestaDevolucion(Base):
+    """Dinero que se le regresó al cliente (reservación cancelada o con excedente). Resta del cobrado neto."""
+
+    __tablename__ = "fiesta_devolucion"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reservacion_id: Mapped[int] = mapped_column(ForeignKey("fiesta_reservacion.id"), nullable=False, index=True)
+    importe: Mapped[float] = mapped_column(Float, nullable=False)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    forma_pago: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    referencia: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    motivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    capturado_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    autorizado_por: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    cancelada: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_ahora)
+
+    reservacion: Mapped[FiestaReservacion] = relationship(back_populates="devoluciones")
 
 
 class FiestaPolizaDia(Base):

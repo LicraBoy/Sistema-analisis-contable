@@ -30,6 +30,7 @@ from app.models.facturacion_factura_adjunta import FacturacionFacturaAdjunta  # 
 from app.models.facturacion_tabla_forma_pago import FacturacionTablaFormaPagoDetalle  # noqa: F401
 from app.models.fiesta_fin_anio import (  # noqa: F401
     FiestaBitacora,
+    FiestaDevolucion,
     FiestaEvento,
     FiestaHistorico,
     FiestaMesa,
@@ -39,6 +40,7 @@ from app.models.fiesta_fin_anio import (  # noqa: F401
     FiestaReservacion,
     FiestaReservacionSilla,
     FiestaSilla,
+    FiestaSolicitudCortesia,
 )
 from app.models.historial_cambio_pago import HistorialCambioPago  # noqa: F401
 from app.models.historial_eliminacion_pago import HistorialEliminacionPago  # noqa: F401

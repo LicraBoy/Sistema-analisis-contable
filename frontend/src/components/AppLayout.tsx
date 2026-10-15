@@ -53,6 +53,7 @@ import {
 import { useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
+import ErrorBoundary from './ErrorBoundary';
 import { useAuth } from '../auth/AuthContext';
 import FormCambioPassword from '../auth/FormCambioPassword';
 import { MODULO_DE_RUTA } from '../auth/guardas';
@@ -346,7 +347,9 @@ export default function AppLayout() {
 
       {/* ── Main content ────────────────────────────── */}
       <AppShell.Main>
-        <Outlet />
+        <ErrorBoundary resetKey={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </AppShell.Main>
 
       <Modal opened={miCuenta} onClose={() => setMiCuenta(false)} title="Mi cuenta" centered>
