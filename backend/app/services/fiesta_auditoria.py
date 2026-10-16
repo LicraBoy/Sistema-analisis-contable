@@ -16,6 +16,8 @@ _CLASIFICACION: dict[tuple[str, str | None], tuple[str, str]] = {
     ("editar_pago_silla", None): ("cobros", "Cobro corregido por silla"),
     ("poliza_dia", None): ("cobros", "Póliza del día"),
     ("cancelar", None): ("cancelaciones", "Reservación cancelada"),
+    ("eliminar", None): ("cancelaciones", "Reservación eliminada del sistema"),
+    ("exportar", None): ("configuracion", "Descargó el Excel de respaldo"),
     ("cancelar_pago", None): ("cancelaciones", "Cobro cancelado"),
     ("devolucion", None): ("cobros", "Devolución registrada"),
     ("cancelar_devolucion", None): ("cancelaciones", "Devolución anulada"),

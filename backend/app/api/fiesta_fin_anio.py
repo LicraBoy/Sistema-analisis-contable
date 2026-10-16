@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.core.descargas import cabecera_descarga
 from app.core.permisos import requiere_capacidad, tiene_capacidad
 from app.services.fiesta_auditoria import GRUPOS as GRUPOS_AUDITORIA, clasificar, fila_a_dict, pares_de_grupo
 from app.core.security import autorizo_por, consumir_autorizacion, get_current_user, ip_actual, usuario_actual
@@ -1254,6 +1255,83 @@ async def editar_reservacion(
     return _reservacion_a_dict(await _cargar_reservacion(db, reservacion.id, evento.id))
 
 
+def _motivo_no_eliminable(reservacion: FiestaReservacion) -> str | None:
+    """Por qué una reservación NO se puede borrar del sistema (None = sí se puede).
+
+    Solo las canceladas y sin dinero registrado: si quedan pagos o devoluciones vigentes, su dinero seguiría contando en
+    Cobros y borrarlas lo haría desaparecer sin rastro.
+    """
+    if reservacion.estatus != "cancelada":
+        return "Solo se pueden eliminar reservaciones canceladas."
+    vigentes = [p for p in reservacion.pagos if not p.cancelado]
+    if vigentes:
+        total = sum(p.importe for p in vigentes)
+        return (
+            f"Todavía tiene {len(vigentes)} pago(s) registrado(s) por ${total:,.2f}. "
+            "Cancela cada pago (o registra la devolución) antes de eliminarla."
+        )
+    if any(not d.cancelada for d in reservacion.devoluciones):
+        return "Tiene devoluciones registradas; anúlalas antes de eliminarla."
+    return None
+
+
+def _eliminar_reservacion(db: AsyncSession, evento: FiestaEvento, reservacion: FiestaReservacion) -> None:
+    """Borra la reservación y deja en la bitácora una copia de lo que tenía (la bitácora no se borra nunca)."""
+    resumen = {
+        "cliente": reservacion.cliente,
+        "telefono_o_cuarto": reservacion.telefono_o_cuarto,
+        "correo": reservacion.correo,
+        "fecha_venta": reservacion.fecha_venta,
+        "motivo_cancelacion": reservacion.motivo_cancelacion,
+        "sillas": len(reservacion.sillas),
+        "pagos_cancelados": [
+            {"fecha": p.fecha, "importe": p.importe, "forma_pago": p.forma_pago} for p in reservacion.pagos
+        ],
+    }
+    _bitacora(
+        db, evento, "eliminar", "reservacion", reservacion.id, None,
+        f"{reservacion.cliente}: reservación cancelada eliminada del sistema",
+        antes=resumen,
+    )
+
+
+@router.delete("/reservaciones/{reservacion_id}/definitivo")
+async def eliminar_reservacion_cancelada(
+    reservacion_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(requiere_capacidad("fiesta_supervisor")),
+):
+    """Elimina del sistema una reservación CANCELADA sin dinero registrado (solo supervisor). Queda en la bitácora."""
+    evento = await _evento_activo(db)
+    reservacion = await _cargar_reservacion(db, reservacion_id, evento.id)
+    motivo = _motivo_no_eliminable(reservacion)
+    if motivo:
+        raise HTTPException(status_code=409, detail=motivo)
+    _eliminar_reservacion(db, evento, reservacion)
+    await db.delete(reservacion)
+    return {"eliminada": reservacion_id}
+
+
+@router.post("/reservaciones/eliminar-canceladas")
+async def eliminar_canceladas_sin_dinero(
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(requiere_capacidad("fiesta_supervisor")),
+):
+    """Elimina de una vez todas las canceladas que ya no tienen dinero registrado; las demás se dejan y se informan."""
+    evento = await _evento_activo(db)
+    eliminadas, con_dinero = 0, []
+    for r in await _reservaciones_evento(db, evento.id):
+        if r.estatus != "cancelada":
+            continue
+        if _motivo_no_eliminable(r):
+            con_dinero.append({"id": r.id, "cliente": r.cliente})
+            continue
+        _eliminar_reservacion(db, evento, r)
+        await db.delete(r)
+        eliminadas += 1
+    return {"eliminadas": eliminadas, "con_dinero": con_dinero}
+
+
 @router.delete("/reservaciones/{reservacion_id}")
 async def cancelar_reservacion(
     reservacion_id: int,
@@ -2375,6 +2453,39 @@ async def obtener_auditoria(
         "usuarios": usuarios,
         "grupos": GRUPOS_AUDITORIA,
     }
+
+
+@router.get("/exportar-excel")
+async def exportar_excel_completo(
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(requiere_capacidad("fiesta_supervisor")),
+):
+    """Excel de respaldo con TODA la información importante, explicada hoja por hoja (solo supervisor).
+
+    Es la segunda opción por si el sistema no está disponible. Trae datos personales de clientes, por eso queda anotado
+    en la auditoría quién lo descargó y cuándo."""
+    from app.services.fiesta_excel import construir_libro
+
+    evento = await _evento_activo(db)
+    hoy = date.today()
+    datos = {
+        "evento": _evento_a_dict(evento, await _precios(db, evento.id)),
+        "generado_en": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "usuario": (user or {}).get("nombre") or (user or {}).get("email") or "sistema",
+        "resumen": await obtener_resumen(fecha_corte=hoy, anio_comparativo=None, db=db, _user=user),
+        "cobros": await obtener_cobros(db=db, _user=user),
+        "mesas": (await _estado_mesas(db, evento))[0],
+        "reservaciones": [_reservacion_a_dict(r) for r in await _reservaciones_evento(db, evento.id)],
+        "historico": (await obtener_historico(anio=None, db=db, _user=user))["filas"],
+        "historico_pagos": await obtener_historico_pagos(anio=None, db=db, _user=user),
+    }
+    contenido = construir_libro(datos)
+    _bitacora(db, evento, "exportar", "evento", evento.id, None, "Descargó el Excel de respaldo completo")
+    return StreamingResponse(
+        io.BytesIO(contenido),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=cabecera_descarga(f"Fiesta_{evento.anio}_respaldo_{hoy:%Y-%m-%d}.xlsx"),
+    )
 
 
 @router.get("/auditoria/export")

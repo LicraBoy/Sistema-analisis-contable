@@ -449,3 +449,69 @@ async def test_historico_de_pagos_de_ninos_2025_por_dia(api):
     # año sin datos: respuesta vacía, no error
     vacio = (await c.get(f"{PREFIJO}/historico/pagos", params={"anio": 2019})).json()
     assert vacio["dias"] == [] and vacio["tipos"]["nino"]["disponible"] is False
+
+
+async def test_eliminar_canceladas_solo_sin_dinero_y_queda_en_la_auditoria(api):
+    c, _ = api
+    # activa: no se puede eliminar
+    activa, _ = await _reservar(c, "Activa", ["adulto"])
+    r0 = await c.delete(f"{PREFIJO}/reservaciones/{activa.json()['id']}/definitivo")
+    assert r0.status_code == 409 and "canceladas" in r0.json()["detail"]
+    # cancelada CON pago vigente: no se puede (el dinero seguiría en Cobros)
+    con_pago, _ = await _reservar(c, "Con pago", ["adulto"])
+    cid = con_pago.json()["id"]
+    await c.post(f"{PREFIJO}/reservaciones/{cid}/pagos", json={"importe": 500, "forma_pago": "Efectivo", "fecha": HOY})
+    await c.delete(f"{PREFIJO}/reservaciones/{cid}", params={"motivo": "prueba"})
+    r1 = await c.delete(f"{PREFIJO}/reservaciones/{cid}/definitivo")
+    assert r1.status_code == 409 and "pago" in r1.json()["detail"].lower()
+    # cancelada sin dinero: se elimina y desaparece de la lista
+    sin_dinero, _ = await _reservar(c, "Sin dinero", ["adulto"])
+    sid = sin_dinero.json()["id"]
+    await c.delete(f"{PREFIJO}/reservaciones/{sid}", params={"motivo": "ya no"})
+    assert (await c.delete(f"{PREFIJO}/reservaciones/{sid}/definitivo")).status_code == 200
+    assert (await c.get(f"{PREFIJO}/reservaciones/{sid}")).status_code == 404
+    ids = {x["id"] for x in (await c.get(f"{PREFIJO}/reservaciones", params={"incluir_canceladas": True})).json()["reservaciones"]}
+    assert sid not in ids and cid in ids
+    aud = (await c.get(f"{PREFIJO}/auditoria", params={"reservacion_id": sid})).json()
+    assert any(f["accion"] == "eliminar" and f["antes"]["cliente"] == "Sin dinero" for f in aud["filas"])
+    # en lote: borra las que no tienen dinero y avisa de las que sí
+    otra, _ = await _reservar(c, "Otra cancelada", ["nino"])
+    await c.delete(f"{PREFIJO}/reservaciones/{otra.json()['id']}", params={"motivo": "x"})
+    lote = (await c.post(f"{PREFIJO}/reservaciones/eliminar-canceladas")).json()
+    assert lote["eliminadas"] == 1 and [x["id"] for x in lote["con_dinero"]] == [cid]
+    # las sillas de lo eliminado quedan libres y la activa no se tocó
+    assert (await c.get(f"{PREFIJO}/reservaciones/{activa.json()['id']}")).status_code == 200
+
+
+async def test_exportar_excel_completo_trae_todas_las_hojas_con_formulas(api):
+    import io
+    from openpyxl import load_workbook
+
+    c, _ = api
+    r, _ = await _reservar(c, "Cliente Excel", ["adulto", "nino"])
+    rid = r.json()["id"]
+    await c.post(f"{PREFIJO}/reservaciones/{rid}/pagos", json={"importe": 800, "forma_pago": "Efectivo", "fecha": HOY})
+    otra, _ = await _reservar(c, "Cancelada Excel", ["adulto"])
+    await c.delete(f"{PREFIJO}/reservaciones/{otra.json()['id']}", params={"motivo": "prueba"})
+    resp = await c.get(f"{PREFIJO}/exportar-excel")
+    assert resp.status_code == 200 and "spreadsheetml" in resp.headers["content-type"]
+    assert "respaldo" in resp.headers["content-disposition"]
+    libro = load_workbook(io.BytesIO(resp.content))
+    assert libro.sheetnames == ["LEEME", "Resumen", "Reservaciones", "Sillas", "Pagos", "Cobros por día", "Devoluciones", "Comparativo anterior", "Configuración"]
+    # cada hoja explica qué es (fila 2) y tiene encabezados (fila 4)
+    for nombre in libro.sheetnames[1:]:
+        assert libro[nombre]["A1"].value and libro[nombre]["A2"].value and libro[nombre]["A4"].value, nombre
+    res = libro["Reservaciones"]
+    nombres = [res.cell(row=f, column=2).value for f in range(5, res.max_row + 1)]
+    assert "Cliente Excel" in nombres and "Cancelada Excel" in nombres
+    fila = 5 + nombres.index("Cliente Excel")
+    assert res.cell(row=fila, column=14).value == f"=L{fila}-M{fila}"  # saldo es fórmula viva
+    assert res.cell(row=fila, column=13).value == 800
+    assert str(res.cell(row=res.max_row, column=12).value).startswith("=SUM(")
+    sillas = libro["Sillas"]
+    assert sillas.max_row > 700  # todas las sillas del salón, también las libres
+    pagos = libro["Pagos"]
+    assert pagos.cell(row=5, column=5).value == 800 and pagos.cell(row=5, column=9).value == "Vigente"
+    # queda en la auditoría
+    aud = (await c.get(f"{PREFIJO}/auditoria", params={"accion": "exportar"})).json()
+    assert any(f["accion"] == "exportar" for f in aud["filas"])

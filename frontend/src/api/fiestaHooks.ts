@@ -631,6 +631,30 @@ export function useFiestaResolverCortesia() {
   });
 }
 
+/** Elimina del sistema una reservación CANCELADA sin dinero registrado (solo supervisor). */
+export function useFiestaEliminarReservacion() {
+  const invalidar = useInvalidarFiesta();
+  return useMutation({
+    mutationFn: async (id: number): Promise<{ eliminada: number }> => {
+      const response = await apiClient.delete(`/fiesta-fin-anio/reservaciones/${id}/definitivo`);
+      return response.data;
+    },
+    onSettled: invalidar,
+  });
+}
+
+/** Elimina de una vez todas las canceladas sin dinero; devuelve cuántas y cuáles se dejaron por tener dinero. */
+export function useFiestaEliminarCanceladas() {
+  const invalidar = useInvalidarFiesta();
+  return useMutation({
+    mutationFn: async (): Promise<{ eliminadas: number; con_dinero: { id: number; cliente: string }[] }> => {
+      const response = await apiClient.post('/fiesta-fin-anio/reservaciones/eliminar-canceladas');
+      return response.data;
+    },
+    onSettled: invalidar,
+  });
+}
+
 /** Junta la reservación `origenId` dentro de `id` (sillas y pagos); la de origen queda cancelada como fusionada. */
 export function useFiestaFusionarReservaciones() {
   const invalidar = useInvalidarFiesta();
@@ -887,6 +911,17 @@ export async function descargarAuditoriaExcel(filtros: FiestaAuditoriaFiltros): 
   URL.revokeObjectURL(url);
 }
 
+
+/** Descarga el Excel de respaldo con toda la información de la Fiesta, explicada hoja por hoja (solo supervisor). */
+export async function descargarExcelCompleto(): Promise<void> {
+  const response = await apiClient.get('/fiesta-fin-anio/exportar-excel', { responseType: 'blob' });
+  const url = URL.createObjectURL(response.data as Blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Fiesta_respaldo_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // ── Devoluciones y confirmación al cliente ──
 

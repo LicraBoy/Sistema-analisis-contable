@@ -12,6 +12,7 @@ import { useState } from 'react';
 import {
   IconCash,
   IconChartBar,
+  IconFileSpreadsheet,
   IconLayoutGrid,
   IconListDetails,
   IconHistory,
@@ -19,6 +20,7 @@ import {
 } from '@tabler/icons-react';
 
 import {
+  descargarExcelCompleto,
   esEventoNoPreparado,
   mensajeErrorFiesta,
   useFiestaEvento,
@@ -42,6 +44,18 @@ export default function FiestaFinAnioPage() {
   const { puede } = useAuth();
   const veAuditoria = puede('fiesta_auditoria', 1); // las cajeras no la ven (el servidor también responde 403)
   const veCampana = puede('fiesta_supervisor', 2); // solo quien puede autorizar cortesías ve la campana
+  const [exportando, setExportando] = useState(false);
+  const exportar = async () => {
+    setExportando(true);
+    try {
+      await descargarExcelCompleto();
+      notifications.show({ color: 'green', message: 'Excel de respaldo descargado. Guárdalo en un lugar seguro: trae datos de los clientes.' });
+    } catch (e) {
+      notifications.show({ color: 'red', title: 'No se pudo exportar', message: mensajeErrorFiesta(e) });
+    } finally {
+      setExportando(false);
+    }
+  };
 
   if (isLoading) return <Loader />;
 
@@ -94,6 +108,11 @@ export default function FiestaFinAnioPage() {
         <Title order={2}>{evento.nombre}</Title>
         <Group gap="xs">
           {veCampana && <SolicitudesCortesia />}
+          {veCampana && (
+            <Button variant="default" leftSection={<IconFileSpreadsheet size={16} />} loading={exportando} onClick={exportar} title="Excel con toda la información importante, explicada hoja por hoja (segunda opción por si el sistema no está disponible)">
+              Exportar a Excel
+            </Button>
+          )}
           <GuiaCajeras />
         </Group>
       </Group>

@@ -34,12 +34,18 @@ import {
   IconPlus,
   IconPrinter,
   IconSearch,
+  IconTrash,
   IconX,
 } from '@tabler/icons-react';
+import { notifications } from '@mantine/notifications';
 import { useMemo, useState } from 'react';
+
+import { useAuth } from '../../auth/AuthContext';
 
 import {
   mensajeErrorFiesta,
+  useFiestaEliminarCanceladas,
+  useFiestaEliminarReservacion,
   useFiestaMesas,
   useFiestaReservaciones,
   type FiestaEvento,
@@ -97,6 +103,34 @@ export default function TablaReservaciones({ evento }: { evento: FiestaEvento })
   // Se trae todo una vez y se filtra aquí: los contadores y los filtros responden al instante.
   const { data, isLoading, isError, error } = useFiestaReservaciones({ incluir_canceladas: true });
   const { data: mesasData } = useFiestaMesas();
+  const { puede } = useAuth();
+  const puedeEliminar = puede('fiesta_supervisor', 2); // solo un supervisor borra reservaciones canceladas
+  const eliminarUna = useFiestaEliminarReservacion();
+  const eliminarLote = useFiestaEliminarCanceladas();
+  const sinDinero = (r: FiestaReservacion) => r.estatus === 'cancelada' && !r.pagos.some((p) => !p.cancelado) && !r.devoluciones.some((d) => !d.cancelada);
+  const borrarUna = async (r: FiestaReservacion) => {
+    if (!window.confirm(`¿Eliminar del sistema la reservación #${r.id} de ${r.cliente}? Ya está cancelada y no tiene dinero registrado. Quedará anotado en la Auditoría.`)) return;
+    try {
+      await eliminarUna.mutateAsync(r.id);
+      notifications.show({ color: 'green', message: `Reservación #${r.id} eliminada.` });
+    } catch (e) {
+      notifications.show({ color: 'red', title: 'No se pudo eliminar', message: mensajeErrorFiesta(e), autoClose: 8000 });
+    }
+  };
+  const borrarCanceladas = async () => {
+    const n = todas.filter(sinDinero).length;
+    if (!window.confirm(`¿Eliminar del sistema las ${n} reservaciones canceladas que ya no tienen dinero registrado? Las que aún tengan pagos o devoluciones no se tocan. Quedará anotado en la Auditoría.`)) return;
+    try {
+      const r = await eliminarLote.mutateAsync();
+      notifications.show({
+        color: 'green',
+        message: `${r.eliminadas} reservación(es) eliminada(s).${r.con_dinero.length ? ` ${r.con_dinero.length} se dejaron porque todavía tienen dinero registrado.` : ''}`,
+        autoClose: 7000,
+      });
+    } catch (e) {
+      notifications.show({ color: 'red', title: 'No se pudo eliminar', message: mensajeErrorFiesta(e), autoClose: 8000 });
+    }
+  };
   const todas = data?.reservaciones ?? [];
   const mesas = mesasData?.mesas ?? [];
 
@@ -204,6 +238,26 @@ export default function TablaReservaciones({ evento }: { evento: FiestaEvento })
             ))}
           </Group>
 
+          {estado === 'cancelada' && puedeEliminar && (
+            <Paper withBorder p="sm" radius="md" data-testid="barra-eliminar-canceladas">
+              <Group justify="space-between" wrap="wrap" gap="sm">
+                <Text size="sm" c="dimmed">
+                  Las canceladas que ya no tienen dinero registrado se pueden eliminar del sistema (queda anotado en la Auditoría). Las que aún tienen pagos primero hay que cancelarles cada pago.
+                </Text>
+                <Button
+                  color="red"
+                  variant="light"
+                  leftSection={<IconTrash size={16} />}
+                  disabled={!todas.some(sinDinero)}
+                  loading={eliminarLote.isPending}
+                  onClick={borrarCanceladas}
+                >
+                  Eliminar canceladas sin dinero ({todas.filter(sinDinero).length})
+                </Button>
+              </Group>
+            </Paper>
+          )}
+
           {filtradas.length === 0 && !isLoading ? (
             <Paper withBorder p="xl" ta="center">
               <Text c="dimmed">
@@ -220,6 +274,7 @@ export default function TablaReservaciones({ evento }: { evento: FiestaEvento })
                   r={r}
                   onVer={() => setDetalle({ id: r.id, abonar: false })}
                   onAbonar={() => setDetalle({ id: r.id, abonar: true })}
+                  onEliminar={puedeEliminar && sinDinero(r) ? () => borrarUna(r) : undefined}
                 />
               ))}
             </SimpleGrid>
@@ -277,10 +332,12 @@ function TarjetaReservacion({
   r,
   onVer,
   onAbonar,
+  onEliminar,
 }: {
   r: FiestaReservacion;
   onVer: () => void;
   onAbonar: () => void;
+  onEliminar?: () => void;
 }) {
   const cancelada = r.estatus === 'cancelada';
   const cfg = ESTADO_RESERVACION_CONFIG[r.estado];
@@ -346,6 +403,21 @@ function TarjetaReservacion({
               {dinero(r.saldo)}
             </Text>
           </div>
+        )}
+        {cancelada && onEliminar && (
+          <Button
+            size="xs"
+            color="red"
+            variant="light"
+            leftSection={<IconTrash size={14} />}
+            data-testid="eliminar-cancelada"
+            onClick={(e) => {
+              e.stopPropagation();
+              onEliminar();
+            }}
+          >
+            Eliminar
+          </Button>
         )}
         {puedeAbonar && (
           <Button
