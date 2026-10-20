@@ -44,11 +44,14 @@ import {
   IconMinimize,
   IconMinus,
   IconPlus,
+  IconDownload,
+  IconPrinter,
   IconSearch,
   IconX,
 } from '@tabler/icons-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   mensajeErrorFiesta,
@@ -63,6 +66,7 @@ import { EscenarioSalon, RotulosSalon, type ZonaMesas } from './escenario/Escena
 import { MARGEN_PLATAFORMA, MUNDO, aPantalla, type Pt } from './escenario/geometria';
 import { HOTEL } from './escenario/geometriaHotel';
 import { MesaSvg } from './escenario/MesaSvg';
+import { descargarCroquisImagen, imprimirCroquis } from './fiestaImpresion';
 import PanelMesaFiesta from './PanelMesaFiesta';
 import { entero, ESTADO_SILLA_CONFIG, ORDEN_ESTADOS_SILLA, porcentaje } from './fiestaUtils';
 
@@ -223,6 +227,58 @@ export default function CroquisFiesta({ evento }: { evento: FiestaEvento }) {
 
   const verTodo = () => irA(ajuste, { volverAAjuste: true });
   const verHotel = () => irA({ cx: CENTRO_HOTEL.x, cy: CENTRO_HOTEL.y, ancho: anchoHotel });
+
+  /** El plano recortado a la zona de la fiesta (nunca el hotel, aunque la pantalla lo esté mostrando), para
+   * imprimir o guardar como imagen: mismo contenido, cada uno lo usa a su manera. */
+  const generarPlanoParaExportar = () => {
+    const margenX = ANCHO_MUNDO * 0.02;
+    const margenY = ALTO_MUNDO * 0.02;
+    const viewBox = `${(MUNDO.x0 - margenX).toFixed(2)} ${(MUNDO.y0 - margenY).toFixed(2)} ${(ANCHO_MUNDO + margenX * 2).toFixed(2)} ${(ALTO_MUNDO + margenY * 2).toFixed(2)}`;
+    const noop = () => {};
+    const svgInterior = renderToStaticMarkup(
+      <>
+        <EscenarioSalon zonas={zonas} mostrarHotel={false} />
+        <RotulosSalon />
+        {mesas.map((mesa) => {
+          const p = enPantalla(mesa);
+          return (
+            <MesaSvg
+              key={mesa.id}
+              mesa={mesa}
+              x={p.x}
+              y={p.y}
+              seleccionada={false}
+              resaltada={false}
+              atenuada={false}
+              editando={false}
+              mostrarNumero
+              onAbrir={noop}
+              onPresionar={noop}
+            />
+          );
+        })}
+      </>,
+    );
+    return { svgInterior, viewBox };
+  };
+
+  const imprimir = () => {
+    if (!data) return;
+    imprimirCroquis({ nombreEvento: evento.nombre, totales: data.totales, ...generarPlanoParaExportar() });
+  };
+
+  const [descargando, setDescargando] = useState(false);
+  const descargarImagen = async () => {
+    if (!data) return;
+    setDescargando(true);
+    try {
+      await descargarCroquisImagen({ nombreEvento: evento.nombre, totales: data.totales, ...generarPlanoParaExportar() });
+    } catch (e) {
+      notifications.show({ color: 'red', title: 'No se pudo generar la imagen', message: mensajeErrorFiesta(e) });
+    } finally {
+      setDescargando(false);
+    }
+  };
 
   /** Zoom alrededor de un punto de la pantalla (fracciones 0..1 del contenedor). */
   const zoomEn = (factor: number, fx = 0.5, fy = 0.5, animar = false) => {
@@ -707,6 +763,16 @@ export default function CroquisFiesta({ evento }: { evento: FiestaEvento }) {
             <Tooltip label="Ver todo el recinto" position="left">
               <ActionIcon variant="subtle" color="gray" size="lg" aria-label="Ver todo el recinto" onClick={verTodo}>
                 <IconFocusCentered size={18} />
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip label="Imprimir croquis (solo la zona de la fiesta, a color)" position="left">
+              <ActionIcon variant="subtle" color="gray" size="lg" aria-label="Imprimir croquis" disabled={!data} onClick={imprimir}>
+                <IconPrinter size={18} />
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip label="Descargar croquis como imagen (PNG, a color)" position="left">
+              <ActionIcon variant="subtle" color="gray" size="lg" aria-label="Descargar croquis como imagen" disabled={!data} loading={descargando} onClick={descargarImagen}>
+                <IconDownload size={18} />
               </ActionIcon>
             </Tooltip>
           </Stack>
