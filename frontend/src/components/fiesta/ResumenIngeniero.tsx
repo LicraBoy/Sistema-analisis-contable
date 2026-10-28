@@ -29,9 +29,13 @@ export default function ResumenIngeniero({ data, fechaCorte }: { data: FiestaRes
   const subtotalPago = estado.pagadas + estado.anticipos + sinAnticipoActual;
 
   // Año pasado AL MISMO DÍA que el corte elegido: va sumándose día con día hasta llegar al cierre.
-  //  · adultos y niños: acumulado de las listas de boletos de ese año hasta ese día (mes/día);
-  //  · total, pagadas, anticipos y cortesías: última captura del Excel hasta ese día;
-  //  · de la fecha del cierre en adelante se usa el cierre tal cual.
+  //  · niños: acumulado de la lista de boletos de niño hasta ese día (mes/día; es por fecha de PAGO, puede ser
+  //    un mínimo si hay niños reservados que todavía no pagan nada);
+  //  · total, pagadas, anticipos y cortesías: última captura del Excel hasta ese día (confiable);
+  //  · adultos: NO viene de su propia lista de pagos (esa lista solo trae boletos con algún pago capturado y
+  //    deja fuera las reservas "sin anticipo", que sí cuentan en el Total real) — se calcula como el restante
+  //    hasta completar el Total (Total − Niños − Cortesías), así el desglose por tipo siempre cuadra exacto.
+  //  · de la fecha del cierre en adelante se usa el cierre tal cual (ahí sí hay adultos/niños reales del Excel).
   const { data: pagosHist } = useFiestaHistoricoPagos(data.anio_comparativo);
   const [, mesCorte, diaCorte] = fechaCorte.split('-');
   const corteAnterior = `${anioPasado}-${mesCorte}-${diaCorte}`;
@@ -60,13 +64,15 @@ export default function ResumenIngeniero({ data, fechaCorte }: { data: FiestaRes
       subtotal: cierre ? cierre.pagados + cierre.anticipos + cierre.sin_anticipo + cierre.cortesias : null,
     };
   } else {
-    const adultos = acumulado('adulto');
     const ninos = acumulado('nino');
+    const cortesias = captura ? captura.cortesias : null;
     const total = captura ? captura.reservados : null;
+    // Adultos = lo que sobra del Total real tras Niños y Cortesías (ver comentario de arriba).
+    const adultos = total !== null && ninos !== null && cortesias !== null ? Math.max(0, total - ninos - cortesias) : null;
     prev = {
       adultos,
       ninos,
-      cortesias: captura ? captura.cortesias : null,
+      cortesias,
       total,
       pagadas: captura ? captura.pagados : null,
       anticipos: captura ? captura.anticipos : null,
@@ -120,7 +126,7 @@ export default function ResumenIngeniero({ data, fechaCorte }: { data: FiestaRes
 
         {cierre && !enElCierre && (
           <Text size="xs" c="dimmed" p="sm" data-testid="nota-acumulado">
-            {anioPasado} se muestra AL MISMO DÍA ({diaCorte}/{mesCorte}) y va sumándose hasta el cierre. Adultos y niños son los que ya habían pagado ese día (las listas de boletos son por fecha de pago); los reservados que aún no pagaban no tienen tipo registrado, por eso antes del cierre adultos + niños + cortesías pueden quedar por debajo del total.
+            {anioPasado} se muestra AL MISMO DÍA ({diaCorte}/{mesCorte}) y va sumándose hasta el cierre. Niños sale de la lista de boletos por fecha de pago (puede ser un mínimo si hay niños reservados que todavía no pagan nada); Adultos es lo que falta para completar el Total real de esa fecha, así el desglose siempre cuadra exacto.
           </Text>
         )}
         {!cierre && (
