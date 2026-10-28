@@ -62,6 +62,17 @@ export function hoyISO(): string {
   return `${d.getFullYear()}-${mes}-${dia}`;
 }
 
+/** `YYYY-MM-DD` ↔ `Date` local a mediodía (así un `DateInput` de Mantine no se corre de día por la zona horaria). */
+export function isoADate(iso: string): Date {
+  const [a, m, d] = iso.split('-').map(Number);
+  return new Date(a, (m || 1) - 1, d || 1, 12);
+}
+export function dateAIso(fecha: Date): string {
+  const mes = String(fecha.getMonth() + 1).padStart(2, '0');
+  const dia = String(fecha.getDate()).padStart(2, '0');
+  return `${fecha.getFullYear()}-${mes}-${dia}`;
+}
+
 /** `2026-12-31` → `31/12/2026` sin pasar por `Date` (evita desfases de zona horaria). */
 export function fechaCorta(iso: string | null | undefined): string {
   if (!iso) return '—';

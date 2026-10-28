@@ -3,6 +3,7 @@
  */
 
 import { MantineProvider } from '@mantine/core';
+import { DatesProvider } from '@mantine/dates';
 import { Notifications } from '@mantine/notifications';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
@@ -43,6 +44,8 @@ const protegida = (ruta: string, pantalla: React.ReactNode) => <RequireModulo ru
 export default function App() {
   return (
     <MantineProvider theme={theme} defaultColorScheme="light" cssVariablesResolver={cssVariablesResolver}>
+      {/* Nombres de mes/día en español y la semana empezando en lunes, en todos los calendarios de la app. */}
+      <DatesProvider settings={{ locale: 'es', firstDayOfWeek: 1 }}>
       <Notifications position="top-right" />
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
@@ -88,6 +91,7 @@ export default function App() {
           </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>
+      </DatesProvider>
     </MantineProvider>
   );
 }

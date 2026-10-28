@@ -39,7 +39,9 @@ try {
   ok('encabezado 2025 al 15/11', filas.includes('2025 al 15/11'), '');
   const num = (etq) => ev(`(()=>{const r=[...document.querySelectorAll('table')][0].querySelectorAll('tbody tr');for(const x of r){const c=[...x.children].map(e=>e.innerText.trim());if(c[0]==='${etq}')return c;}return null})()`);
   const ad = await num('ADULTOS'), ni = await num('+NIÑOS'), pg = await num('R.PAGADAS'), tot = await num('TOTAL');
-  ok('adultos 2025 acumulados al 15/11 = 148', ad && ad.includes('148'), JSON.stringify(ad));
+  // Adultos ya NO sale de su propia lista de pagos (dejaba fuera las reservas "sin anticipo"): es el restante
+  // hasta completar el Total real → 286 (total) − 5 (niños) − 0 (cortesías) = 281.
+  ok('adultos 2025 = Total − Niños − Cortesías = 281', ad && ad.includes('281'), JSON.stringify(ad));
   ok('niños 2025 acumulados al 15/11 = 5', ni && ni.includes('5'), JSON.stringify(ni));
   ok('pagadas 2025 al 15/11 = 45 (captura del Excel)', pg && pg.includes('45'), JSON.stringify(pg));
   ok('total 2025 al 15/11 = 286', tot && tot.includes('286'), JSON.stringify(tot));

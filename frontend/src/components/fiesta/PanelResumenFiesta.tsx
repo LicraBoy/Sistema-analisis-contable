@@ -5,8 +5,9 @@
  *    fiscal, y el comparativo contra el año pasado (cierre, mismo día y gráfica por día).
  */
 
-import { ActionIcon, Alert, Badge, Button, Group, Loader, NumberInput, Paper, Progress, SegmentedControl, SimpleGrid, Stack, Table, Text, TextInput, Title, Tooltip as TooltipMantine } from '@mantine/core';
-import { IconCheck, IconPencil, IconX } from '@tabler/icons-react';
+import { ActionIcon, Alert, Badge, Button, Group, Loader, NumberInput, Paper, Progress, SegmentedControl, SimpleGrid, Stack, Table, Text, Title, Tooltip as TooltipMantine } from '@mantine/core';
+import { DateInput } from '@mantine/dates';
+import { IconCalendarEvent, IconCheck, IconPencil, IconX } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { useMemo, useState } from 'react';
 import { CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -23,7 +24,7 @@ import {
   type FiestaVariacion,
 } from '../../api/fiestaHooks';
 import ResumenIngeniero from './ResumenIngeniero';
-import { dinero, entero, ESTADO_SILLA_CONFIG, fechaCorta, filaDelAnioPasado, hoyISO, porcentaje } from './fiestaUtils';
+import { dateAIso, dinero, entero, ESTADO_SILLA_CONFIG, fechaCorta, filaDelAnioPasado, hoyISO, isoADate, porcentaje } from './fiestaUtils';
 
 export default function PanelResumenFiesta() {
   const [fechaCorte, setFechaCorte] = useState(hoyISO());
@@ -51,7 +52,28 @@ export default function PanelResumenFiesta() {
               { value: 'detallado', label: 'Resumen detallado' },
             ]}
           />
-          <TextInput label="Al día" type="date" value={fechaCorte} onChange={(e) => setFechaCorte(e.currentTarget.value)} w={170} />
+          <DateInput
+            label="Al día"
+            placeholder="Elige una fecha"
+            leftSection={<IconCalendarEvent size={16} />}
+            value={isoADate(fechaCorte)}
+            onChange={(d) => d && setFechaCorte(dateAIso(d))}
+            valueFormat="DD/MM/YYYY"
+            firstDayOfWeek={1}
+            highlightToday
+            clearable={false}
+            w={190}
+            rightSectionPointerEvents="auto"
+            rightSection={
+              fechaCorte !== hoyISO() ? (
+                <TooltipMantine label="Ir a hoy">
+                  <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Ir a hoy" onClick={() => setFechaCorte(hoyISO())}>
+                    <IconX size={14} />
+                  </ActionIcon>
+                </TooltipMantine>
+              ) : undefined
+            }
+          />
         </Group>
       </Group>
 
